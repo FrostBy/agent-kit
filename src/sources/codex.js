@@ -59,7 +59,11 @@ function findSession({ home = CODEX_DIR, root = process.cwd(), session, threadId
     }
     if (session) throw new Error(`Codex session not found: ${clean(session)}`);
   }
-  return files.find((p) => { const m = readMeta(p); return typeof m?.cwd === 'string' && samePath(root, m.cwd); }) || null;
+  return files.find((p) => {
+    const m = readMeta(p);
+    if (typeof m?.cwd !== 'string' || !samePath(root, m.cwd)) return false;
+    return !(m.parent_thread_id || (typeof m.source === 'object' && m.source && 'subagent' in m.source));
+  }) || null;
 }
 
 function state() {

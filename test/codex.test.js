@@ -125,6 +125,25 @@ test('Codex discovery stays inside the selected umbrella and supports explicit s
   assert.throws(() => codex.findSession({ home, root, session: 'missing' }), /not found/);
 });
 
+test('Codex auto pick skips guardian subagent rollouts in the same cwd', (t) => {
+  const home = temp(t), root = path.join(home, 'work');
+  const sessions = path.join(home, 'sessions', '2026', '10', '25');
+  fs.mkdirSync(sessions, { recursive: true });
+  const write = (name, meta) => {
+    const file = path.join(sessions, name + '.jsonl');
+    fs.writeFileSync(file, jsonl([row('session_meta', meta)]));
+    return file;
+  };
+  const parent = write('rollout-01-parent', { id: 'parent', cwd: root });
+  const guardian = write('rollout-02-guardian', {
+    id: 'guardian', cwd: root, parent_thread_id: '01a17063-x',
+    source: { subagent: { other: 'guardian' } }, thread_source: 'guardian_review',
+  });
+  assert.equal(codex.findSession({ home, root, threadId: '' }), parent);
+  assert.equal(codex.findSession({ home, root, session: 'guardian' }), guardian);
+  assert.equal(codex.findSession({ home, root, threadId: 'parent' }), parent);
+});
+
 test('Git counts deleted/staged files and does not parse rename source paths as statuses', () => {
   const s = git.parseStatus('# branch.head main\0# branch.ab +2 -1\0'
     + '1 .D N... 100644 100644 000000 a b deleted\0'
