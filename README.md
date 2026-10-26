@@ -1,7 +1,7 @@
 <h1 align="center">agent-statusline</h1>
 
 <p align="center">
-  <a href="https://github.com/FrostBy/claude-statusline-ultimate/actions/workflows/ci.yml"><img src="https://github.com/FrostBy/claude-statusline-ultimate/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/FrostBy/agent-statusline/actions/workflows/ci.yml"><img src="https://github.com/FrostBy/agent-statusline/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-MIT-blue" alt="Licence: MIT"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node >= 20">
   <img src="https://img.shields.io/badge/dependencies-0-success" alt="Zero dependencies">
@@ -82,7 +82,7 @@ Configure with `node statusline.js --codex --configure`. Codex has its own `~/.c
 Install it globally from GitHub, then point Claude Code at it:
 
 ```sh
-npm install -g github:FrostBy/claude-statusline-ultimate
+npm install -g github:FrostBy/agent-statusline
 agent-statusline --install
 ```
 
@@ -98,7 +98,7 @@ agent-statusline --configure
 
 The editor shows a live preview on sample data. Keys: `↑↓` select, `a` add a widget, `d` delete, `K`/`J` move, `|` separator, `Enter` widget options, `n` new line, `g` global settings, `s` save, `q` quit. In mintty or Git Bash run it through `winpty`.
 
-The Claude config lives in `~/.claude/statusline.json` (override with `AGENT_STATUSLINE_CONFIG` or `CLAUDE_STATUSLINE_CONFIG`). Missing values come from the defaults, and `--init` writes them out. The old `claude-statusline-ultimate` command remains an alias. GitHub URLs retain the existing repository name until the remote is renamed; the package name and new command are `agent-statusline`.
+The Claude config lives in `~/.claude/statusline.json` (override with `AGENT_STATUSLINE_CONFIG` or `CLAUDE_STATUSLINE_CONFIG`). Missing values come from the defaults, and `--init` writes them out. The old `claude-statusline-ultimate` command remains an alias. The package name and command are `agent-statusline`.
 
 ```json
 {

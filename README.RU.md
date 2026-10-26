@@ -1,7 +1,7 @@
 <h1 align="center">agent-statusline</h1>
 
 <p align="center">
-  <a href="https://github.com/FrostBy/claude-statusline-ultimate/actions/workflows/ci.yml"><img src="https://github.com/FrostBy/claude-statusline-ultimate/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/FrostBy/agent-statusline/actions/workflows/ci.yml"><img src="https://github.com/FrostBy/agent-statusline/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-MIT-blue" alt="Лицензия: MIT"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node >= 20">
   <img src="https://img.shields.io/badge/dependencies-0-success" alt="Без зависимостей">
@@ -82,7 +82,7 @@ gpt-6.1-sol high   ctx ▰▰▱▱▱ 42% 200k/475k   ⚙  exec npm test   📋
 Глобально с GitHub, затем подключить к Claude Code:
 
 ```sh
-npm install -g github:FrostBy/claude-statusline-ultimate
+npm install -g github:FrostBy/agent-statusline
 agent-statusline --install
 ```
 
@@ -98,7 +98,7 @@ agent-statusline --configure
 
 Редактор показывает живое превью на тестовых данных. Клавиши: `↑↓` выбор, `a` добавить блок, `d` удалить, `K`/`J` двигать, `|` разделитель, `Enter` опции блока, `n` новая строка, `g` общие настройки, `s` сохранить, `q` выход. В mintty и Git Bash запускайте через `winpty`.
 
-Конфиг Claude лежит в `~/.claude/statusline.json` (путь меняется через `AGENT_STATUSLINE_CONFIG` или `CLAUDE_STATUSLINE_CONFIG`). Всё, чего нет в файле, берётся из умолчаний, `--init` записывает их в файл. Старая команда `claude-statusline-ultimate` сохранена как алиас. GitHub URL остаётся прежним до переименования удалённого репозитория; имя пакета и новая команда — `agent-statusline`.
+Конфиг Claude лежит в `~/.claude/statusline.json` (путь меняется через `AGENT_STATUSLINE_CONFIG` или `CLAUDE_STATUSLINE_CONFIG`). Всё, чего нет в файле, берётся из умолчаний, `--init` записывает их в файл. Старая команда `claude-statusline-ultimate` сохранена как алиас. Имя пакета и команда — `agent-statusline`.
 
 ```json
 {
