@@ -24,9 +24,20 @@ async function loadData(input, config, now, sources = {}) {
     plan: () => usageSrc.plan(),
     transcript: () => transcriptSrc.load(input.transcript_path),
     today: () => todaySrc.load(now, config.todayTtl),
+    codex: (accepts) => require('./sources/codex').load(cwd, now, undefined, accepts),
+    kimi: (accepts) => require('./sources/kimi').load(cwd, now, undefined, accepts),
     ...sources,
   };
+  const external = (id) => {
+    const w = byId[id];
+    const options = config.lines.flat().filter((it) => itemId(it) === id)
+      .map((it) => ({ ...optsFor(w, config), ...(typeof it === 'object' ? it : {}) }));
+    const accepts = (updatedAt) => options.some((o) => w.accepts({ in: input, now }, o, updatedAt));
+    return needs.has(id) && accepts(now) ? s[id](accepts) : null;
+  };
   const data = {
+    codex: external('codex'),
+    kimi: external('kimi'),
     in: input,
     now,
     git: needs.has('git') ? await s.git(cwd, optsFor(byId.git, config)) : null,

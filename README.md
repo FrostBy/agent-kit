@@ -1,4 +1,4 @@
-<h1 align="center">claude-statusline-ultimate</h1>
+<h1 align="center">agent-statusline</h1>
 
 <p align="center">
   <a href="https://github.com/FrostBy/claude-statusline-ultimate/actions/workflows/ci.yml"><img src="https://github.com/FrostBy/claude-statusline-ultimate/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/i18n-en%20%7C%20ru-informational" alt="English and Russian">
 </p>
 
-**A configurable status line for [Claude Code](https://code.claude.com).** Context, the 5-hour, weekly and per-model limits with a burn-rate forecast, git across every repo of an umbrella folder, live tool activity. Zero dependencies, a TUI editor, English and Russian.
+**A configurable status line for [Claude Code](https://code.claude.com), with an experimental native footer for a patched Codex CLI.** Context, quotas, git across umbrella repositories and runtime activity. A dependency-free Node renderer, a TUI editor, English and Russian.
 
 Русская версия: [README.RU.md](README.RU.md)
 
@@ -30,13 +30,60 @@ Fable 5.1 high   ctx ▰▰▱▱▱ 42% 84k/200k   ⚙  Edit render.js   📋 3
 - **Money only when it is money**: session cost and today's spend across all sessions appear on API billing, or on a subscription once extra usage starts being spent in the current session. Within the subscription limits they stay hidden.
 - **Subagent rows**: a line per subagent in the agents panel with model, effort, tokens, share of context and a sparkline.
 
+## Codex
+
+### Native footer in the custom CLI
+
+This experiment runs from source: first build Codex following [patches/README.md](patches/README.md), then run the launcher from this checkout:
+
+```sh
+node scripts/native-codex.js
+```
+
+This starts a separate Codex CLI with our footer inside its interface. Pass a project directory as the second argument if needed. The launcher uses `.native/test-home` and an unauthenticated loopback test provider; it does not edit the installed Codex or user config. Model requests and live account quotas are unavailable in this profile. If Windows offers sandbox setup, press Esc to inspect the footer without installing anything.
+
+Layout and styling follow the original Claude version. Model, effort, context, quotas, active tools, todos, subagents and already-cached PR metadata come from native CLI JSON. Git uses the shared scanner. Unavailable blocks are omitted; the row budget follows terminal height, and Git totals include hidden repositories. See [patches/README.md](patches/README.md) for the patch and limitations.
+
+### Standalone log inspector (legacy mode)
+
+From this checkout, in a separate terminal or Windows Terminal pane:
+
+```sh
+node statusline.js --codex --watch
+```
+
+Exit with `q` or `Ctrl+C`. Omit `--watch` for one snapshot. Preview a three-repository umbrella:
+
+```sh
+node statusline.js --codex --preview
+```
+
+```text
+gpt-6.1-sol high   ctx ▰▰▱▱▱ 42% 200k/475k   ⚙  exec npm test   📋 3/7   agents 2
+5h ▰▰▰▱▱ 63% ↻ 1h42m   7d ▰▰▱▱▱ 41% ↻ 3d8h
+▸ api    ⎇ master     2 to push +120 −34 ?3
+  web    ⎇ feat/login 1 to pull +48 −12 ?1
+  infra  ⎇ master     +3 −1
+  Σ +171 −47
+```
+
+`+/−` counts line changes against HEAD in tracked files; `?` counts individual untracked files. Untracked contents are excluded from line counts. Totals include repositories hidden by `git.max`.
+
+Use `--root="Z:/work"` for an umbrella directory. Pin a session with `--session=UUID` or `--session="C:/path/session.jsonl"`. Otherwise the panel uses `CODEX_THREAD_ID` if it belongs to that root, or the newest session started in the root or its descendants. Automatic selection excludes unrelated projects.
+
+The log inspector reads `~/.codex/sessions` (or `$CODEX_HOME/sessions`), then only appended bytes. It refreshes every two seconds; the header shows the last usage snapshot time. Quota percentages show usage consumed. `ctx` compares the last request against this session's effective window (`model_context_window` in the log), which may be smaller than the model's API maximum. Only reported quota windows are displayed.
+
+This is a separate panel, rather than an extension of Codex's built-in `/statusline`. It can run alongside CLI, desktop or IDE sessions with local logs. The log format is internal and may change. Tool activity, plans and subagents require their corresponding log events; nested code-mode commands are not parsed. Codex mode does not read Claude OAuth credentials or make network requests. Dollar costs and cache-expiry estimates are not computed.
+
+Configure with `node statusline.js --codex --configure`. Codex has its own `~/.codex/statusline.json`. `AGENT_STATUSLINE_CONFIG` overrides the file for either mode; `CLAUDE_STATUSLINE_CONFIG` still works for Claude.
+
 ## Install
 
 Install it globally from GitHub, then point Claude Code at it:
 
 ```sh
 npm install -g github:FrostBy/claude-statusline-ultimate
-claude-statusline-ultimate --install
+agent-statusline --install
 ```
 
 `--install` writes `statusLine` and `subagentStatusLine` into `~/.claude/settings.json` as `node "<install path>/statusline.js"`, so each render runs the installed copy and fetches nothing. The previous values are saved and `--uninstall` puts them back. The settings file is left untouched if it does not parse.
@@ -46,12 +93,12 @@ To update, run the `npm install -g` line again.
 ## Configure
 
 ```sh
-claude-statusline-ultimate --configure
+agent-statusline --configure
 ```
 
 The editor shows a live preview on sample data. Keys: `↑↓` select, `a` add a widget, `d` delete, `K`/`J` move, `|` separator, `Enter` widget options, `n` new line, `g` global settings, `s` save, `q` quit. In mintty or Git Bash run it through `winpty`.
 
-The config lives in `~/.claude/statusline.json` (override the path with `CLAUDE_STATUSLINE_CONFIG`). Anything missing comes from the defaults, and `--init` writes them out.
+The Claude config lives in `~/.claude/statusline.json` (override with `AGENT_STATUSLINE_CONFIG` or `CLAUDE_STATUSLINE_CONFIG`). Missing values come from the defaults, and `--init` writes them out. The old `claude-statusline-ultimate` command remains an alias. GitHub URLs retain the existing repository name until the remote is renamed; the package name and new command are `agent-statusline`.
 
 ```json
 {
@@ -83,11 +130,16 @@ Other commands: `--preview` renders sample data in the current folder, `--list [
 
 ## Widgets
 
+In Claude mode, add `codex` and `kimi` to `lines` manually. `exclude` lists paths separated by `;`, hiding the widget in those folders and descendants (case-insensitive on Windows). `maxAge` is the session age in minutes. Kimi logs above 16 MiB are hidden. Reads are local, without credentials.
+Kimi shows `limit 5h` for 5 hours after a 5-hour quota error; `limit month` (monthly) and `limit` (unknown window) remain for 30 days after the event.
+
 <!-- widgets:start -->
 #### Model & session
 
 | id | description | options |
 |---|---|---|
+| `codex` | External Codex: model, context, tokens, quotas | `exclude="", maxAge=120, tokens=false` |
+| `kimi` | External Kimi: model, context, tokens, limit | `exclude="", maxAge=120, tokens=false` |
 | `model` | Model |  |
 | `effort` | Effort level |  |
 | `thinking` | Extended thinking enabled |  |
@@ -96,7 +148,7 @@ Other commands: `--preview` renders sample data in the current folder, `--list [
 | `session-name` | Session name | `max=24` |
 | `duration` | Session duration |  |
 | `api-time` | Share of time waiting for the API |  |
-| `version` | Claude Code version |  |
+| `version` | Harness version |  |
 | `style` | Output style, if not default |  |
 | `vim` | Vim mode |  |
 | `agent` | Agent name (--agent) |  |
@@ -113,6 +165,7 @@ Other commands: `--preview` renders sample data in the current folder, `--list [
 
 | id | description | options |
 |---|---|---|
+| `limits` | Codex quota windows, with their actual durations | `label="", bar=5, countdown=true, pace=true, paceMargin=10` |
 | `limit-5h` | 5-hour limit | `label="5h", bar=5, countdown=true, pace=true, paceMargin=10` |
 | `limit-7d` | Weekly limit | `label="7d", bar=5, countdown=true, pace=true, paceMargin=10` |
 | `limit-model` | Per-model weekly limits (Fable etc.), usage API | `countdown=false, pace=true, paceMargin=10` |
@@ -177,7 +230,7 @@ Other commands: `--preview` renders sample data in the current folder, `--list [
 - The usage API and today's spend refresh in detached processes on their TTL.
 - Today's spend is priced per model from the `usage` of each response in today's transcripts, subagents included, with duplicate content blocks counted once. Files are read incrementally, gigabyte-sized ones in chunks.
 - Git is read from the folder the session was launched in, so a `cd` into one repo does not hide the others.
-- The cache lives in `claude-statusline` under the system temp folder.
+- The cache lives in `agent-statusline` under the system temp folder.
 
 ## Windows Terminal
 

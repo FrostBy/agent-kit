@@ -1,3 +1,7 @@
 node_modules/
 *.tmp
 .DS_Store
+.native/
+.serena/
+CLAUDE.md
+AGENTS.md

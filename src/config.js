@@ -1,5 +1,5 @@
 'use strict';
-const { CONFIG_PATH, readJson, writeJson, deepMerge } = require('./util');
+const { HARNESS, CONFIG_PATH, readJson, writeJson, deepMerge } = require('./util');
 
 const DEFAULTS = {
   lines: [
@@ -26,10 +26,19 @@ const DEFAULTS = {
   subagent: { show: ['type', 'model', 'effort', 'tokens', 'spark', 'elapsed', 'label'] },
 };
 
+const CODEX_DEFAULTS = deepMerge(DEFAULTS, {
+  lines: [
+    DEFAULTS.lines[0],
+    ['limits'],
+    DEFAULTS.lines[2],
+    DEFAULTS.lines[3],
+  ],
+});
+
 function load(p = CONFIG_PATH) {
-  return deepMerge(DEFAULTS, readJson(p) || {});
+  return deepMerge(HARNESS === 'codex' ? CODEX_DEFAULTS : DEFAULTS, readJson(p) || {});
 }
 
 const save = (cfg, p = CONFIG_PATH) => writeJson(p, cfg);
 
-module.exports = { DEFAULTS, load, save, CONFIG_PATH };
+module.exports = { DEFAULTS, CODEX_DEFAULTS, load, save, CONFIG_PATH };

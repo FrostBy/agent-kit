@@ -38,4 +38,30 @@ const sampleSources = (now) => ({
   today: () => ({ total: 23.8, sessions: 5 }),
 });
 
-module.exports = { sample, sampleSources };
+function codexSample(now = Date.now(), cwd = process.cwd()) {
+  const path = require('path');
+  const base = sample(now, cwd);
+  const input = {
+    harness: 'codex', session_id: 'demo', model: { display_name: 'gpt-6.1-sol' }, effort: base.effort,
+    workspace: { project_dir: cwd, current_dir: path.join(cwd, 'api') }, cost: { total_duration_ms: 5_400_000 },
+    context_window: { context_window_size: 475000, used_tokens: 199500, used_percentage: 42 },
+    quota_windows: [
+      { label: '5h', used_percentage: 63, resets_at: now / 1000 + 6120, window_seconds: 18000 },
+      { label: '7d', used_percentage: 41, resets_at: now / 1000 + 288000, window_seconds: 604800 },
+    ],
+    token_usage: { input_tokens: 1400000, output_tokens: 18000, cached_input_tokens: 1280000, reasoning_output_tokens: 5000 },
+  };
+  return {
+    input, plan: { label: 'Pro', api: false }, usageAt: new Date(now).toISOString(),
+    activity: { tool: { name: 'exec', detail: 'npm test' }, todos: { done: 3, total: 7 }, agents: 2 },
+    git: {
+      mode: 'umbrella', root: cwd, repos: [
+        { dir: path.join(cwd, 'api'), branch: 'master', changed: 6, deleted: 1, staged: 2, untracked: 3, add: 120, del: 34, ahead: 2, behind: 0, conflicts: 0, stash: 0 },
+        { dir: path.join(cwd, 'web'), branch: 'feat/login', changed: 2, deleted: 0, staged: 0, untracked: 1, add: 48, del: 12, ahead: 0, behind: 1, conflicts: 0, stash: 1 },
+        { dir: path.join(cwd, 'infra'), branch: 'master', changed: 1, deleted: 0, staged: 0, untracked: 0, add: 3, del: 1, ahead: 0, behind: 0, conflicts: 0, stash: 0 },
+      ],
+    },
+  };
+}
+
+module.exports = { sample, sampleSources, codexSample };

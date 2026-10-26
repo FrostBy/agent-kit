@@ -4,7 +4,8 @@ const config = require('./config');
 const { WIDGETS, GROUPS, byId } = require('./widgets');
 const { renderLines, loadData } = require('./render');
 const { makeTheme, COLOR_NAMES, ICONS } = require('./theme');
-const { sample, sampleSources } = require('./sample');
+const { sample, sampleSources, codexSample } = require('./sample');
+const { HARNESS } = require('./util');
 const { detectLang, tr, makeT, UI } = require('./i18n');
 
 const out = process.stdout;
@@ -47,7 +48,9 @@ function run() {
     ],
   };
   let previewData = null;
-  loadData(sample(now, process.cwd()), { ...cfg, lines: [WIDGETS.map((w) => w.id)] }, now, { ...sampleSources(now), git: () => fakeGit })
+  const demo = HARNESS === 'codex' ? codexSample(now, process.cwd()) : null;
+  const previewSources = demo ? { usage: () => null, today: () => null, plan: () => demo.plan, transcript: () => demo.activity } : sampleSources(now);
+  loadData(demo?.input || sample(now, process.cwd()), { ...cfg, lines: [WIDGETS.map((w) => w.id)] }, now, { ...previewSources, git: () => demo?.git || fakeGit })
     .then((d) => { previewData = d; draw(); });
 
   function rows() {

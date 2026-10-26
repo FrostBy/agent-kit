@@ -1,8 +1,8 @@
 {
-  "name": "claude-statusline-ultimate",
-  "version": "0.1.0",
-  "description": "Configurable status line for Claude Code: context, 5h/weekly/per-model limits with burn-rate forecast, git across umbrella folders, live activity, TUI editor. Zero dependencies.",
-  "bin": { "claude-statusline-ultimate": "statusline.js" },
+  "name": "agent-statusline",
+  "version": "0.2.0",
+  "description": "Status line for Claude Code and a native footer for patched Codex CLI: context, quotas, git across umbrella folders, runtime activity. Zero Node dependencies.",
+  "bin": { "agent-statusline": "statusline.js", "claude-statusline-ultimate": "statusline.js" },
   "main": "statusline.js",
   "files": ["statusline.js", "src/", "README.md", "README.RU.md", "LICENSE"],
   "scripts": { "test": "node --test" },
@@ -10,7 +10,7 @@
   "repository": { "type": "git", "url": "git+https://github.com/FrostBy/claude-statusline-ultimate.git" },
   "homepage": "https://github.com/FrostBy/claude-statusline-ultimate#readme",
   "bugs": { "url": "https://github.com/FrostBy/claude-statusline-ultimate/issues" },
-  "keywords": ["claude", "claude-code", "statusline", "status-line", "anthropic", "cli", "terminal", "git", "monorepo", "rate-limit", "tui"],
+  "keywords": ["codex", "openai", "claude", "claude-code", "statusline", "status-line", "anthropic", "cli", "terminal", "git", "monorepo", "rate-limit", "tui"],
   "author": "Vladislav Romanovsky <frost.by@gmail.com>",
   "license": "MIT"
 }

@@ -6,7 +6,7 @@ const config = require('./src/config');
 const { render } = require('./src/render');
 const { WIDGETS, GROUPS } = require('./src/widgets');
 const { detectLang, tr, makeT } = require('./src/i18n');
-const { CLAUDE_DIR, readJson, writeJson, forwardSlashes } = require('./src/util');
+const { HARNESS, CLAUDE_DIR, readJson, writeJson, forwardSlashes } = require('./src/util');
 const pkg = require('./package.json');
 
 const args = process.argv.slice(2);
@@ -17,6 +17,11 @@ const HELP = `${pkg.name} ${pkg.version}
 
   (stdin)            render the status line from Claude Code JSON
   --preview          render with sample data in the current directory
+  --codex-native     render a native footer from patched Codex JSON on stdin
+  --codex            show a Codex panel from local session logs
+  --codex --watch    refresh the panel every 2 seconds (q / Ctrl+C to exit)
+  --session=ID|FILE  pin a Codex session UUID or JSONL file
+  --root=PATH        git umbrella and Codex project root (default: current directory)
   --configure        interactive editor (TUI)
   --list [--md]      list all widgets
   --init [--force]   write the default config to ${config.CONFIG_PATH}
@@ -27,7 +32,7 @@ const HELP = `${pkg.name} ${pkg.version}
 
 const readStdin = () => { try { const raw = fs.readFileSync(0, 'utf8'); return raw.trim() ? JSON.parse(raw) : {}; } catch { return {}; } };
 // Pending git/fetch promises would keep Node alive; Claude Code waits for exit, so we leave explicitly.
-const done = (text) => { process.stdout.write(text); process.exit(0); };
+const done = (text, code = 0) => { process.stdout.write(text); process.exit(code); };
 
 async function refreshWorker(kind) {
   if (kind === 'usage') await require('./src/sources/usage').refresh();
@@ -68,7 +73,7 @@ function install() {
   const backup = path.join(CLAUDE_DIR, 'statusline.backup.json');
   if (!fs.existsSync(backup)) writeJson(backup, { statusLine: s.statusLine ?? null, subagentStatusLine: s.subagentStatusLine ?? null });
   // Claude Code runs the command through Git Bash on Windows, which eats backslashes in paths.
-  const base = flag('--npx') ? `npx -y ${pkg.name}` : `node "${forwardSlashes(path.join(__dirname, 'statusline.js'))}"`;
+  const base = flag('--npx') ? `npx -y ${pkg.repository.url.replace(/^git\+/, '')}` : `node "${forwardSlashes(path.join(__dirname, 'statusline.js'))}"`;
   s.statusLine = { type: 'command', command: base, padding: 0, refreshInterval: 30 };
   s.subagentStatusLine = { type: 'command', command: `${base} --subagent` };
   writeJson(settingsPath, s);
@@ -93,14 +98,25 @@ async function main() {
   if (flag('--help') || flag('-h')) return done(HELP);
   if (flag('--version') || flag('-v')) return done(`${pkg.version}\n`);
   if (flag('--list')) return done(listWidgets(flag('--md'), value('--lang') || detectLang(config.load())));
+  if (HARNESS === 'codex' && ['--install', '--uninstall', '--subagent'].some(flag)) {
+    throw new Error('--install/--uninstall/--subagent apply to Claude Code; native Codex needs a patched CLI');
+  }
   if (flag('--install')) return done(install());
   if (flag('--uninstall')) return done(uninstall());
   if (flag('--init')) {
     if (fs.existsSync(config.CONFIG_PATH) && !flag('--force')) return done(`exists: ${config.CONFIG_PATH} (use --force)\n`);
-    config.save(config.DEFAULTS);
+    config.save(HARNESS === 'codex' ? config.CODEX_DEFAULTS : config.DEFAULTS);
     return done(`written: ${config.CONFIG_PATH}\n`);
   }
   if (flag('--configure') || args[0] === 'config') return require('./src/tui').run();
+
+  if (flag('--codex-native')) {
+    return done((await require('./src/native').renderNative(readStdin(), config.load())).join('\n'));
+  }
+  if (HARNESS === 'codex') {
+    await require('./src/panel').run({ root: value('--root'), session: value('--session'), watch: flag('--watch'), demo: flag('--preview') });
+    return done('');
+  }
 
   const cfg = config.load();
   if (flag('--subagent')) return done(require('./src/subagent').renderSubagents(readStdin(), cfg).join('\n'));
@@ -117,4 +133,4 @@ async function main() {
   return done(lines.join('\n'));
 }
 
-main().catch((e) => done(`statusline: ${e.message}`));
+main().catch((e) => done(`statusline: ${e.message}\n`, 1));

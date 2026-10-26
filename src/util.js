@@ -5,8 +5,12 @@ const os = require('os');
 
 const HOME = os.homedir();
 const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
-const CONFIG_PATH = process.env.CLAUDE_STATUSLINE_CONFIG || path.join(CLAUDE_DIR, 'statusline.json');
-const CACHE_DIR = path.join(os.tmpdir(), 'claude-statusline');
+const CODEX_DIR = process.env.CODEX_HOME || path.join(HOME, '.codex');
+const HARNESS = process.argv.some((arg) => arg === '--codex' || arg === '--codex-native') ? 'codex' : 'claude';
+const CONFIG_PATH = process.env.AGENT_STATUSLINE_CONFIG || (HARNESS === 'codex'
+  ? path.join(CODEX_DIR, 'statusline.json')
+  : process.env.CLAUDE_STATUSLINE_CONFIG || path.join(CLAUDE_DIR, 'statusline.json'));
+const CACHE_DIR = path.join(os.tmpdir(), 'agent-statusline');
 
 const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
 
@@ -56,6 +60,6 @@ function deepMerge(base, over) {
 const forwardSlashes = (p) => p.split(path.sep).join('/');
 
 module.exports = {
-  HOME, CLAUDE_DIR, CONFIG_PATH, CACHE_DIR,
+  HOME, CLAUDE_DIR, CODEX_DIR, HARNESS, CONFIG_PATH, CACHE_DIR,
   readJson, writeJson, clamp, toEpoch, tokens, duration, until, money, bar, sparkline, deepMerge, forwardSlashes,
 };

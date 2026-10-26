@@ -1,5 +1,7 @@
 'use strict';
 const path = require('path');
+const fs = require('fs');
+const { createHash } = require('crypto');
 const { spawn } = require('child_process');
 const { CACHE_DIR, readJson, writeJson } = require('./util');
 
@@ -29,4 +31,42 @@ function getStale(name, ttlMs, now, worker = name) {
   return c?.data ?? null;
 }
 
-module.exports = { read, write, writeRaw, getStale, spawnWorker, file };
+const keyFor = (kind, filename) => `${kind}-${createHash('sha256').update(path.resolve(filename)).digest('hex')}`;
+
+function parsedFile(filename, parse) {
+  if (!fs.existsSync(filename)) return parse();
+  const st = fs.statSync(filename), key = keyFor('parsed', filename);
+  const old = read(key);
+  if (old?.size === st.size && old.mtime === st.mtimeMs && old.ino === st.ino) return old.data;
+  const data = parse();
+  writeRaw(key, { size: st.size, mtime: st.mtimeMs, ino: st.ino, data });
+  return data;
+}
+
+function incremental(filename, initial, reduce) {
+  const st = fs.statSync(filename), key = keyFor('log', filename);
+  let c = read(key);
+  if (c?.size === st.size && c.mtime === st.mtimeMs && c.ino === st.ino) return c.data;
+  if (!c || c.ino !== st.ino || st.size < c.size || (st.size === c.size && st.mtimeMs !== c.mtime)) c = { offset: 0, data: initial() };
+  const fd = fs.openSync(filename, 'r');
+  try {
+    const buf = Buffer.alloc(256 * 1024);
+    let pending = Buffer.alloc(0), position = c.offset;
+    while (position < st.size) {
+      const n = fs.readSync(fd, buf, 0, Math.min(buf.length, st.size - position), position);
+      if (!n) break;
+      position += n;
+      pending = Buffer.concat([pending, buf.subarray(0, n)]);
+      const end = pending.lastIndexOf(10);
+      if (end >= 0) {
+        c.data = reduce(pending.subarray(0, end).toString('utf8'), c.data);
+        c.offset += end + 1;
+        pending = pending.subarray(end + 1);
+      }
+    }
+  } finally { fs.closeSync(fd); }
+  writeRaw(key, { ...c, size: st.size, mtime: st.mtimeMs, ino: st.ino });
+  return c.data;
+}
+
+module.exports = { read, write, writeRaw, getStale, spawnWorker, file, parsedFile, incremental };

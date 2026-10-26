@@ -8,6 +8,20 @@ const bool = (d, desc) => ({ type: 'bool', default: d, desc });
 const num = (d, min, max, desc) => ({ type: 'number', default: d, min, max, desc });
 const str = (d, desc) => ({ type: 'string', default: d, desc });
 
+function contextText(cw, o, t) {
+  if (cw?.used_percentage == null) return null;
+  const pct = Math.round(cw.used_percentage);
+  const parts = [o.label && t.paint('muted', o.label)].filter(Boolean);
+  if (o.bar) parts.push(t.sev(pct, bar(pct, o.bar, t.icon('barFull'), t.icon('barEmpty'))));
+  if (o.percent) parts.push(t.sev(pct, `${pct}%`));
+  const size = cw.context_window_size;
+  const u = cw.current_usage;
+  const used = cw.used_tokens ?? (u ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : size * cw.used_percentage / 100);
+  if (size && o.used) parts.push(t.paint('muted', `${tokens(used)}/${tokens(size)}`));
+  if (size && o.left) parts.push(t.paint('muted', `${tokens(Math.max(0, size - used))} left`));
+  return parts.join(' ');
+}
+
 function limitText(t, label, pct, resetsAt, windowSec, now, o) {
   if (pct == null) return null;
   pct = Math.round(pct);
@@ -62,7 +76,7 @@ def({ id: 'api-time', group: 'session', desc: { en: 'Share of time waiting for t
   const c = d.in.cost || {};
   return c.total_duration_ms > 0 && c.total_api_duration_ms != null && t.paint('muted', `api ${Math.round((c.total_api_duration_ms / c.total_duration_ms) * 100)}%`);
 } });
-def({ id: 'version', group: 'session', desc: { en: 'Claude Code version', ru: 'Версия Claude Code' }, render: (d, o, t) => d.in.version && t.paint('muted', `v${d.in.version}`) });
+def({ id: 'version', group: 'session', desc: { en: 'Harness version', ru: 'Версия харнеса' }, render: (d, o, t) => d.in.version && t.paint('muted', `v${d.in.version}`) });
 def({ id: 'style', group: 'session', desc: { en: 'Output style, if not default', ru: 'Output style, если не default' }, render: (d, o, t) => d.in.output_style?.name && d.in.output_style.name !== 'default' && t.paint('muted', d.in.output_style.name) });
 def({ id: 'vim', group: 'session', desc: { en: 'Vim mode', ru: 'Режим vim' }, render: (d, o, t) => d.in.vim?.mode && t.paint(d.in.vim.mode === 'INSERT' ? 'ok' : 'info', d.in.vim.mode) });
 def({ id: 'agent', group: 'session', desc: { en: 'Agent name (--agent)', ru: 'Имя агента (--agent)' }, render: (d, o, t) => d.in.agent?.name && t.paint('info', `${t.iconSp('agent')}${d.in.agent.name}`) });
@@ -75,18 +89,7 @@ def({ id: 'permission-mode', group: 'session', desc: { en: 'Permission mode, if 
 def({ id: 'context', group: 'context', desc: { en: 'Context: bar, %, used/window', ru: 'Контекст: полоска, %, занято/окно' },
   opts: { label: str('ctx', { en: 'Label', ru: 'Подпись' }), bar: num(5, 0, 40, { en: 'Bar width, 0 — none', ru: 'Ширина полоски, 0 — без неё' }), percent: bool(true, { en: 'Percent', ru: 'Процент' }), used: bool(true, { en: 'Tokens used / window size', ru: 'Занято токенов / размер окна' }), left: bool(false, { en: 'Tokens left', ru: 'Сколько токенов осталось' }) },
   render: (d, o, t) => {
-    const cw = d.in.context_window;
-    if (cw?.used_percentage == null) return null;
-    const pct = Math.round(cw.used_percentage);
-    const parts = [o.label && t.paint('muted', o.label)].filter(Boolean);
-    if (o.bar) parts.push(t.sev(pct, bar(pct, o.bar, t.icon('barFull'), t.icon('barEmpty'))));
-    if (o.percent) parts.push(t.sev(pct, `${pct}%`));
-    const size = cw.context_window_size;
-    const u = cw.current_usage;
-    const used = u ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : size * cw.used_percentage / 100;
-    if (size && o.used) parts.push(t.paint('muted', `${tokens(used)}/${tokens(size)}`));
-    if (size && o.left) parts.push(t.paint('muted', `${tokens(Math.max(0, size - used))} left`));
-    return parts.join(' ');
+    return contextText(d.in.context_window, o, t);
   } });
 def({ id: 'context-breakdown', group: 'context', desc: { en: 'Context by type: fresh input / cache read / cache write', ru: 'Контекст по типам: свежий ввод / чтение кэша / запись кэша' }, render: (d, o, t) => {
   const u = d.in.context_window?.current_usage;
@@ -95,6 +98,12 @@ def({ id: 'context-breakdown', group: 'context', desc: { en: 'Context by type: f
 
 const PACE = { en: "Forecast 'out in …' when burning faster than the window", ru: 'Прогноз «out in …», если расход быстрее окна' };
 const limitOpts = (label) => ({ label: str(label, { en: 'Label', ru: 'Подпись' }), bar: num(5, 0, 20, { en: 'Bar width, 0 — none', ru: 'Ширина полоски, 0 — без неё' }), countdown: bool(true, { en: 'Countdown to reset', ru: 'Отсчёт до сброса' }), pace: bool(true, PACE), paceMargin: num(10, 0, 50, { en: 'Pace threshold, pp', ru: 'Порог темпа, п.п.' }) });
+
+def({ id: 'limits', group: 'limits', desc: { en: 'Codex quota windows, with their actual durations', ru: 'Окна лимитов Codex с фактической длительностью' }, opts: limitOpts(''),
+  render: (d, o, t) => {
+    return (d.in.quota_windows || []).map((w) => limitText(t, o.label || w.label, w.used_percentage, w.resets_at, w.window_seconds, d.now, o)).filter(Boolean).join('   ') || null;
+  } });
+
 def({ id: 'limit-5h', group: 'limits', desc: { en: '5-hour limit', ru: 'Лимит за 5 часов' }, opts: limitOpts('5h'),
   render: (d, o, t) => limitText(t, o.label, d.in.rate_limits?.five_hour?.used_percentage, d.in.rate_limits?.five_hour?.resets_at, 5 * 3600, d.now, o) });
 def({ id: 'limit-7d', group: 'limits', desc: { en: 'Weekly limit', ru: 'Лимит за неделю' }, opts: limitOpts('7d'),
@@ -167,19 +176,20 @@ def({ id: 'git', group: 'git', desc: { en: 'Git: branch, commits to push/pull, +
     if (!g) return null;
     const root = t.paint('repo', path.basename(g.root));
     if (g.mode === 'repo') return g.repo && `${root} ${repoBits(t, g.repo, o)}`;
-    const dirty = g.repos.filter((r) => r.changed || r.untracked || r.ahead || r.conflicts);
+    const dirty = g.repos.filter((r) => r.changed || r.untracked || r.ahead || r.behind || r.conflicts || (o.stash && r.stash));
     const name = (r) => path.relative(g.root, r.dir).split(path.sep).join('/');
     const dot = t.paint('muted', ' · ');
     let s = `${root} ${t.paint('muted', `— ${dirty.length} of ${g.repos.length} repos changed`)}`;
     if (o.showClean && g.repos.length > dirty.length) s += t.paint('muted', ` ✓${g.repos.length - dirty.length}`);
+    if (!dirty.length) return s;
     const picked = dirty.slice(0, o.max);
     const nw = o.rows ? Math.max(0, ...picked.map((r) => name(r).length)) : 0;
     const bw = o.rows ? Math.max(0, ...picked.map((r) => cut(r.branch, o.branchMax).length)) : 0;
     const shown = picked.map((r) => `${t.paint('repo', name(r).padEnd(nw))}${o.rows ? '  ' : ' '}${repoBits(t, r, o, bw)}`);
     if (!o.rows) for (const r of shown) s += `${dot}${r}`;
     const more = dirty.length > o.max && t.paint('muted', `+${dirty.length - o.max} more`);
-    const add = dirty.reduce((a, r) => a + r.add, 0), del = dirty.reduce((a, r) => a + r.del, 0);
-    const sum = o.lines && (add || del) && dirty.length > 1 && `${t.paint('muted', t.icon('sum'))} ${delta(t, add, del)}`;
+    const add = dirty.reduce((n, r) => n + (r.add || 0), 0), del = dirty.reduce((n, r) => n + (r.del || 0), 0);
+    const sum = o.lines && dirty.length > 1 && (add || del) && `${t.paint('muted', t.icon('sum'))} ${delta(t, add, del)}`;
     if (o.rows) {
       const here = picked.map((r) => isInside(d.in.workspace?.current_dir, r.dir));
       // Claude Code trims leading whitespace of each line; U+2800 (blank braille) is not whitespace but renders empty.
@@ -227,7 +237,18 @@ def({ id: 'todos', group: 'activity', desc: { en: 'Todo / task progress', ru: '�
   const x = d.transcript?.todos;
   return x && x.total > 0 && `${t.iconSp('todo')}${t.paint(x.done === x.total ? 'ok' : 'info', `${x.done}/${x.total}`)}`;
 } });
-def({ id: 'subagents', group: 'activity', desc: { en: 'Running subagents', ru: 'Число работающих сабагентов' }, needs: ['transcript'], render: (d, o, t) => d.transcript?.agents > 0 && `${t.paint('muted', 'agents')} ${t.paint('info', d.transcript.agents)}` });
+def({ id: 'subagents', group: 'activity', desc: { en: 'Subagents and attention signals', ru: 'Сабагенты и сигналы внимания' }, needs: ['transcript'], render: (d, o, t) => {
+  const parts = [];
+  if (d.transcript?.agents > 0) parts.push(`${t.paint('muted', 'agents')} ${t.paint('info', d.transcript.agents)}`);
+  const alerts = d.transcript?.agent_attention || [];
+  if (alerts[0]?.label) {
+    const text = `${alerts[0].name} ${alerts[0].label}${alerts.length > 1 ? ` (+${alerts.length - 1})` : ''}`;
+    const alert = t.paint(alerts[0].status === 'failed' ? 'crit' : 'warn', text);
+    if (o.attentionRows) return { text: parts[0] || null, rows: [alert] };
+    parts.push(alert);
+  }
+  return parts.join(t.paint('muted', ' · ')) || null;
+} });
 
 def({ id: 'clock', group: 'misc', desc: { en: 'Clock', ru: 'Время' }, opts: { seconds: bool(false, { en: 'With seconds', ru: 'С секундами' }) }, render: (d, o, t) => {
   const x = new Date(d.now);
@@ -247,12 +268,33 @@ def({ id: 'cmd', group: 'misc', desc: { en: 'Output of your own command (cached)
     return out ? t.paint(o.color, out) : null;
   } });
 
+for (const id of ['codex', 'kimi']) {
+  def({ id, group: 'session', desc: { en: id + ' executor: model, context, tokens and limits', ru: id + ': модель, контекст, токены и лимиты' }, needs: [id],
+    opts: { tokens: bool(false, { en: 'Session token totals', ru: 'Токены сессии' }), exclude: str('', { en: 'Hide in paths separated by ;', ru: 'Скрывать в путях через ;' }), maxAge: num(120, 0, 10080, { en: 'Maximum session age, minutes', ru: 'Макс. возраст сессии, мин' }) },
+    accepts: (d, o, updatedAt = d.now) => {
+      const root = d.in.workspace?.project_dir || d.in.workspace?.current_dir || d.in.cwd || process.cwd();
+      return d.in.harness !== 'codex' && d.now - updatedAt <= o.maxAge * 60000
+        && !o.exclude.split(';').some((p) => p.trim() && isInside(root, p.trim()));
+    },
+    render: (d, o, t) => {
+      const source = d[id];
+      if (!source || !byId[id].accepts(d, o, source.updatedAt)) return null;
+      const input = source.input, u = input.token_usage;
+      const parts = [[input.model?.display_name && t.paint('model', input.model.display_name), input.effort?.level && t.paint('muted', input.effort.level)].filter(Boolean).join(' '),
+        contextText(input.context_window, optsFor(byId.context, {}), t),
+        o.tokens && u && t.paint('muted', 'in ' + tokens(u.input_tokens || 0) + ' out ' + tokens(u.output_tokens || 0) + ' cache ' + tokens(u.cached_input_tokens || 0)),
+        ...(input.quota_windows || []).map((w) => limitText(t, w.label, w.used_percentage, w.resets_at, w.window_seconds, d.now, optsFor(byId['limit-5h'], {}))),
+        source.limited && t.paint('crit', source.limitWindow ? `limit ${source.limitWindow}` : 'limit')].filter(Boolean);
+      return parts.length ? t.paint('muted', id) + ' ' + parts.join(t.paint('separator', o.separator)) : null;
+    } });
+}
+
 const GROUPS = { session: { en: 'Model & session', ru: 'Модель и сессия' }, context: { en: 'Context', ru: 'Контекст' }, limits: { en: 'Limits', ru: 'Лимиты' }, money: { en: 'Money & edits', ru: 'Деньги и правки' }, cache: { en: 'Prompt cache', ru: 'Кэш промптов' }, git: 'Git', dir: { en: 'Folders', ru: 'Папки' }, activity: { en: 'Live activity', ru: 'Живая активность' }, misc: { en: 'Misc', ru: 'Прочее' } };
 const byId = Object.fromEntries(W.map((w) => [w.id, w]));
 
 function optsFor(w, config) {
   const defaults = Object.fromEntries(Object.entries(w.opts || {}).map(([k, v]) => [k, v.default]));
-  return { ...defaults, ...(config.widgets?.[w.id] || {}) };
+  return { separator: config.separator ?? '   ', ...defaults, ...(config.widgets?.[w.id] || {}) };
 }
 
 module.exports = { WIDGETS: W, byId, GROUPS, optsFor };

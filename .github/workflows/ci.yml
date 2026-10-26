@@ -28,3 +28,4 @@ jobs:
       - run: npm test
 
       - run: node statusline.js --preview
+      - run: node statusline.js --codex --preview

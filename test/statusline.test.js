@@ -59,7 +59,7 @@ test('rate limit: pace marker only when burning faster than the window', () => {
 
 test('git porcelain v2 and numstat parsing', () => {
   const st = parseStatus('# branch.head main\n# branch.ab +2 -1\n1 M. N... 100644 100644 100644 a b f1\n1 .M N... 100644 100644 100644 a b f2\nu UU N... 1 2 3 4 a b c f3\n? new.txt\n');
-  assert.deepEqual(st, { branch: 'main', ahead: 2, behind: 1, changed: 3, staged: 1, untracked: 1, conflicts: 1 });
+  assert.deepEqual(st, { branch: 'main', ahead: 2, behind: 1, changed: 3, deleted: 0, staged: 1, untracked: 1, conflicts: 1 });
   assert.deepEqual(parseNumstat('3\t1\ta.js\n-\t-\tbin.png\n10\t0\tb.js\n'), { add: 13, del: 1 });
 });
 

@@ -1,4 +1,4 @@
-<h1 align="center">claude-statusline-ultimate</h1>
+<h1 align="center">agent-statusline</h1>
 
 <p align="center">
   <a href="https://github.com/FrostBy/claude-statusline-ultimate/actions/workflows/ci.yml"><img src="https://github.com/FrostBy/claude-statusline-ultimate/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/i18n-en%20%7C%20ru-informational" alt="Английский и русский">
 </p>
 
-**Настраиваемый статуслайн для [Claude Code](https://code.claude.com).** Контекст, лимиты на 5 часов, неделю и по моделям с прогнозом по темпу, git по всем репо папки-зонтика, текущая активность. Без зависимостей, с TUI-редактором, на английском и русском.
+**Настраиваемый статуслайн для [Claude Code](https://code.claude.com) и экспериментальный нативный футер для патченного Codex CLI.** Контекст, лимиты, git по репозиториям папки-зонтика и текущая активность. Node-рендерер без зависимостей, с TUI-редактором, на английском и русском.
 
 English version: [README.md](README.md)
 
@@ -30,13 +30,60 @@ Fable 5.1 high   ctx ▰▰▱▱▱ 42% 84k/200k   ⚙  Edit render.js   📋 3
 - **Деньги, только когда это деньги**: стоимость сессии и расход за сегодня по всем сессиям видны при оплате через API или на подписке, когда в текущей сессии пошёл расход extra usage. Пока вы в рамках подписки, они скрыты.
 - **Строки сабагентов**: по строке на сабагента в панели агентов: модель, effort, токены, доля контекста и мини-график.
 
+## Codex
+
+### Нативный футер в кастомном CLI
+
+Эксперимент запускается из исходников: сначала соберите Codex по [patches/README.md](patches/README.md), затем запустите launcher из этой папки:
+
+```sh
+node scripts/native-codex.js
+```
+
+Это запускает отдельный Codex CLI с нашим футером внутри его интерфейса. Можно передать рабочую папку вторым аргументом. Запускатель использует `.native/test-home` и тестовый локальный провайдер без авторизации; рабочий Codex и его настройки он не меняет. Запросы к модели и живые квоты аккаунта в этом профиле недоступны. Если CLI предлагает установить Windows Sandbox, нажмите Esc для просмотра футера без установки.
+
+Раскладка и оформление повторяют исходную Claude-версию. Модель, effort, контекст, квоты, активный инструмент, todo, сабагенты и уже известный CLI PR приходят из нативного JSON. Git считает общий сканер проекта. Недоступные блоки скрываются; число строк учитывает размер терминала, итог Git включает скрытые репозитории. Патч и ограничения описаны в [patches/README.md](patches/README.md).
+
+### Отдельный просмотрщик логов (прежний режим)
+
+Из этой папки, в отдельном терминале или панели Windows Terminal:
+
+```sh
+node statusline.js --codex --watch
+```
+
+Выход: `q` или `Ctrl+C`. Без `--watch` выводится один снимок. Демо с тремя репозиториями:
+
+```sh
+node statusline.js --codex --preview
+```
+
+```text
+gpt-6.1-sol high   ctx ▰▰▱▱▱ 42% 200k/475k   ⚙  exec npm test   📋 3/7   agents 2
+5h ▰▰▰▱▱ 63% ↻ 1h42m   7d ▰▰▱▱▱ 41% ↻ 3d8h
+▸ api    ⎇ master     2 to push +120 −34 ?3
+  web    ⎇ feat/login 1 to pull +48 −12 ?1
+  infra  ⎇ master     +3 −1
+  Σ +171 −47
+```
+
+`+/−` — строки относительно HEAD в отслеживаемых файлах; `?` — отдельные неотслеживаемые файлы. Их содержимое в число строк не входит. Сумма учитывает и репозитории, скрытые ограничением `git.max`.
+
+`--root="Z:/work"` задаёт папку-зонтик. `--session=UUID` или `--session="C:/path/session.jsonl"` закрепляет сессию. Иначе используется текущий `CODEX_THREAD_ID`, если он относится к этому корню, либо самая новая сессия, запущенная в выбранной папке или её подпапках. Сессии других проектов автоматически не подмешиваются.
+
+Просмотрщик читает `~/.codex/sessions` (или `$CODEX_HOME/sessions`), затем только дописанные байты. Он обновляется раз в 2 секунды; время последнего снимка usage указано в заголовке. Лимиты показывают использованную квоту. `ctx` — последний запрос относительно эффективного окна этой сессии (`model_context_window` в логе), которое может быть меньше максимума модели в API. Показываются только реально полученные окна лимитов.
+
+Это отдельная панель, а не расширение встроенного `/statusline` Codex. Она работает рядом с CLI или desktop/IDE при наличии локальных сессионных логов. Их формат внутренний и может меняться. Инструменты, план и сабагенты видны, когда соответствующие события записаны в лог; вложенные команды внутри code mode не разбираются. Режим Codex не читает OAuth-токены Claude и не делает сетевых запросов; долларовые расходы и таймер остывания кэша не вычисляются.
+
+Настройка: `node statusline.js --codex --configure`. Конфиг Codex отдельный: `~/.codex/statusline.json`. `AGENT_STATUSLINE_CONFIG` задаёт альтернативный файл для любого режима; старый `CLAUDE_STATUSLINE_CONFIG` продолжает работать для Claude.
+
 ## Установка
 
 Глобально с GitHub, затем подключить к Claude Code:
 
 ```sh
 npm install -g github:FrostBy/claude-statusline-ultimate
-claude-statusline-ultimate --install
+agent-statusline --install
 ```
 
 `--install` прописывает `statusLine` и `subagentStatusLine` в `~/.claude/settings.json` как `node "<путь установки>/statusline.js"`: каждая отрисовка запускает установленную копию и ничего не скачивает. Прежние значения сохраняются, `--uninstall` их возвращает. Если settings.json не разбирается, он не трогается.
@@ -46,12 +93,12 @@ claude-statusline-ultimate --install
 ## Настройка
 
 ```sh
-claude-statusline-ultimate --configure
+agent-statusline --configure
 ```
 
 Редактор показывает живое превью на тестовых данных. Клавиши: `↑↓` выбор, `a` добавить блок, `d` удалить, `K`/`J` двигать, `|` разделитель, `Enter` опции блока, `n` новая строка, `g` общие настройки, `s` сохранить, `q` выход. В mintty и Git Bash запускайте через `winpty`.
 
-Конфиг лежит в `~/.claude/statusline.json` (путь меняется через `CLAUDE_STATUSLINE_CONFIG`). Всё, чего нет в файле, берётся из умолчаний, `--init` записывает их в файл.
+Конфиг Claude лежит в `~/.claude/statusline.json` (путь меняется через `AGENT_STATUSLINE_CONFIG` или `CLAUDE_STATUSLINE_CONFIG`). Всё, чего нет в файле, берётся из умолчаний, `--init` записывает их в файл. Старая команда `claude-statusline-ultimate` сохранена как алиас. GitHub URL остаётся прежним до переименования удалённого репозитория; имя пакета и новая команда — `agent-statusline`.
 
 ```json
 {
@@ -83,11 +130,16 @@ claude-statusline-ultimate --configure
 
 ## Блоки
 
+В Claude-режиме добавьте `codex` и `kimi` в `lines` вручную. `exclude` — пути через `;`: виджет скрыт в этих папках и их потомках (на Windows без учёта регистра). `maxAge` — возраст сессии в минутах. Журналы Kimi больше 16 MiB скрываются. Чтение локальное, без credentials.
+Kimi показывает `limit 5h` в течение 5 часов после ошибки 5-часовой квоты; `limit month` (месячный) и `limit` (неизвестное окно) сохраняются 30 дней от события.
+
 <!-- widgets:start -->
 #### Модель и сессия
 
 | id | описание | опции |
 |---|---|---|
+| `codex` | Внешний Codex: модель, контекст, токены, лимиты | `exclude="", maxAge=120, tokens=false` |
+| `kimi` | Внешний Kimi: модель, контекст, токены, limit | `exclude="", maxAge=120, tokens=false` |
 | `model` | Модель |  |
 | `effort` | Уровень effort |  |
 | `thinking` | Extended thinking включён |  |
@@ -96,7 +148,7 @@ claude-statusline-ultimate --configure
 | `session-name` | Имя сессии | `max=24` |
 | `duration` | Длительность сессии |  |
 | `api-time` | Доля времени на ожидание API |  |
-| `version` | Версия Claude Code |  |
+| `version` | Версия харнеса |  |
 | `style` | Output style, если не default |  |
 | `vim` | Режим vim |  |
 | `agent` | Имя агента (--agent) |  |
@@ -113,6 +165,7 @@ claude-statusline-ultimate --configure
 
 | id | описание | опции |
 |---|---|---|
+| `limits` | Окна лимитов Codex с фактической длительностью | `label="", bar=5, countdown=true, pace=true, paceMargin=10` |
 | `limit-5h` | Лимит за 5 часов | `label="5h", bar=5, countdown=true, pace=true, paceMargin=10` |
 | `limit-7d` | Лимит за неделю | `label="7d", bar=5, countdown=true, pace=true, paceMargin=10` |
 | `limit-model` | Недельные лимиты по моделям (Fable и т.п.), usage API | `countdown=false, pace=true, paceMargin=10` |
@@ -177,7 +230,7 @@ claude-statusline-ultimate --configure
 - Usage API и расход за сегодня обновляются в отдельных процессах по своему TTL.
 - Расход за сегодня считается по ценам моделей из `usage` каждого ответа в сегодняшних транскриптах, включая сабагентов; повторяющиеся блоки одного ответа считаются один раз. Файлы читаются инкрементально, гигабайтные — кусками.
 - Git берётся из папки, где запущена сессия, поэтому `cd` в одно репо не прячет остальные.
-- Кэш лежит в `claude-statusline` во временной папке системы.
+- Кэш лежит в `agent-statusline` во временной папке системы.
 
 ## Windows Terminal
 

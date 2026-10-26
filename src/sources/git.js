@@ -10,13 +10,21 @@ const git = (dir, args, timeout = 3000) => new Promise((res) =>
     (err, out) => res(err ? null : out)));
 
 function parseStatus(text) {
-  const r = { branch: '?', ahead: 0, behind: 0, changed: 0, staged: 0, untracked: 0, conflicts: 0 };
-  for (const l of text.split('\n')) {
+  const r = { branch: '?', ahead: 0, behind: 0, changed: 0, deleted: 0, staged: 0, untracked: 0, conflicts: 0 };
+  const nul = text.includes('\0');
+  const records = text.split(nul ? '\0' : '\n');
+  for (let i = 0; i < records.length; i++) {
+    const l = records[i];
     if (l.startsWith('# branch.head ')) r.branch = l.slice(14);
     else if (l.startsWith('# branch.ab ')) { const [a, b] = l.slice(12).split(' '); r.ahead = +a; r.behind = -b; }
     else if (l.startsWith('? ')) r.untracked++;
-    else if (l.startsWith('u ')) { r.conflicts++; r.changed++; }
-    else if (/^[12] /.test(l)) { r.changed++; if (l[2] !== '.') r.staged++; }
+    else if (/^[12u] /.test(l)) {
+      r.changed++;
+      if (l.slice(2, 4).includes('D')) r.deleted++;
+      if (l[0] === 'u') r.conflicts++;
+      else if (l[2] !== '.') r.staged++;
+      if (nul && l[0] === '2') i++;
+    }
   }
   return r;
 }
@@ -31,7 +39,7 @@ function parseNumstat(text) {
 }
 
 async function repoState(dir, opts = {}) {
-  const st = await git(dir, ['status', '--porcelain=v2', '--branch']);
+  const st = await git(dir, ['status', '--porcelain=v2', '-z', '--branch', '--untracked-files=all']);
   if (st == null) return null;
   const r = { dir, ...parseStatus(st), add: 0, del: 0, stash: 0 };
   const jobs = [];
