@@ -74,6 +74,21 @@ test('external executors: local fixtures, usage, context, quotas, filtering and 
   assert.equal(kimi.load(root, now, home).input.token_usage.output_tokens, 210);
 });
 
+test('codex: model display name from models_cache.json, slug as fallback', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-models-test-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const root = path.join(home, 'work'), now = Date.now();
+  const file = path.join(home, 'sessions', 'rollout-1.jsonl');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [
+    { type: 'session_meta', payload: { cwd: root } },
+    { type: 'turn_context', payload: { model: 'gpt-sol' } },
+  ].map((v) => JSON.stringify(v)).join('\n') + '\n');
+  assert.equal(codex.load(root, now, home).input.model.display_name, 'gpt-sol');
+  fs.writeFileSync(path.join(home, 'models_cache.json'), JSON.stringify({ models: [{ slug: 'gpt-sol', display_name: 'Sol Pro' }, { slug: 'other', display_name: 'Other' }] }));
+  assert.equal(codex.load(root, now, home).input.model.display_name, 'Sol Pro');
+});
+
 test('Kimi quota flags use the error message and expire from the event time', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kimi-limit-test-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));

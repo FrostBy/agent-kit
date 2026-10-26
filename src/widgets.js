@@ -68,7 +68,7 @@ def({ id: 'model', group: 'session', desc: { en: 'Model', ru: 'Модель' }, 
 def({ id: 'effort', group: 'session', desc: { en: 'Effort level', ru: 'Уровень effort' }, render: (d, o, t) => d.in.effort?.level && t.paint('muted', d.in.effort.level) });
 def({ id: 'thinking', group: 'session', desc: { en: 'Extended thinking enabled', ru: 'Extended thinking включён' }, render: (d, o, t) => d.in.thinking?.enabled && t.paint('muted', `${t.iconSp('thinking')}think`) });
 def({ id: 'fast', group: 'session', desc: 'Fast mode', render: (d, o, t) => d.in.fast_mode && t.paint('warn', `${t.iconSp('fast')}fast`) });
-def({ id: 'plan', group: 'session', desc: { en: 'Plan: Pro / Max 5x / Max 20x / API', ru: 'Тариф: Pro / Max 5x / Max 20x / API' }, needs: ['plan'], render: (d, o, t) => d.plan && t.paint('muted', d.plan.label) });
+def({ id: 'plan', group: 'session', desc: { en: 'Plan: Pro / Max 5x / Max 20x / API; Team/Enterprise highlighted', ru: 'Тариф: Pro / Max 5x / Max 20x / API; Team/Enterprise подсвечивается' }, needs: ['plan'], render: (d, o, t) => d.plan && t.paint(d.plan.team ? 'warn' : 'muted', d.plan.label) });
 def({ id: 'session-name', group: 'session', desc: { en: 'Session name', ru: 'Имя сессии' }, opts: { max: num(24, 8, 80, { en: 'Max length', ru: 'Макс. длина' }) },
   render: (d, o, t) => d.in.session_name && t.paint('muted', d.in.session_name.length > o.max ? `${d.in.session_name.slice(0, o.max - 1)}…` : d.in.session_name) });
 def({ id: 'duration', group: 'session', desc: { en: 'Session duration', ru: 'Длительность сессии' }, render: (d, o, t) => d.in.cost?.total_duration_ms > 0 && t.paint('muted', `${t.iconSp('clock')}${duration(d.in.cost.total_duration_ms)}`) });

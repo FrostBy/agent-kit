@@ -179,6 +179,16 @@ class Reader {
 
 module.exports = { findSession, readMeta, apply, state, snapshot, Reader, clean, samePath, load };
 
+function modelDisplayName(slug, home) {
+  if (!slug) return slug;
+  const file = path.join(home, 'models_cache.json');
+  const parsed = cache.parsedFile(file, () => {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  });
+  const name = parsed?.models?.find((m) => m?.slug === slug)?.display_name;
+  return clean(name) || slug;
+}
+
 function load(root, now = Date.now(), home = CODEX_DIR, accepts = () => true) {
   try {
     const file = findSession({ home, root, threadId: '' });
@@ -192,6 +202,8 @@ function load(root, now = Date.now(), home = CODEX_DIR, accepts = () => true) {
       return data;
     });
     for (const key of ['limits', 'pending', 'agents']) data[key] = new Map(data[key]);
-    return { input: snapshot(data, root, now).input, updatedAt };
+    const out = snapshot(data, root, now);
+    out.input.model.display_name = clean(modelDisplayName(out.input.model.display_name, home));
+    return { input: out.input, updatedAt };
   } catch { return null; }
 }

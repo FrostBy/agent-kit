@@ -24,7 +24,7 @@ function plan() {
   if (!o) return { label: 'API', api: true };
   const t = o.subscriptionType || '';
   const mult = /(\d+x)/.exec(o.rateLimitTier || '');
-  return { label: `${t.charAt(0).toUpperCase()}${t.slice(1)}${mult ? ` ${mult[1]}` : ''}`, api: false };
+  return { label: `${t.charAt(0).toUpperCase()}${t.slice(1)}${mult ? ` ${mult[1]}` : ''}`, api: false, team: ['team', 'enterprise'].includes(t) };
 }
 
 module.exports = { refresh, load, plan };

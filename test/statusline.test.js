@@ -98,6 +98,17 @@ test('subagent rows: one JSON line per task with context share', () => {
   for (const s of ['rev', 'code-reviewer', 'sonnet-5', '50k', '25%', '1m', 'checking']) assert.ok(o.content.includes(s), `missing ${s}: ${o.content}`);
 });
 
+test('plan widget: Team/Enterprise plan in warn color, others muted', () => {
+  delete process.env.NO_COLOR;
+  const cfg = deepMerge(config.DEFAULTS, { lines: [['plan']] });
+  const [team] = renderLines(cfg, { plan: { label: 'Team', team: true }, now: NOW });
+  const [pro] = renderLines(cfg, { plan: { label: 'Pro', team: false }, now: NOW });
+  assert.ok(team.includes('\x1b[33m'), team);
+  assert.ok(!team.includes('\x1b[90m'), team);
+  assert.ok(pro.includes('\x1b[90m'), pro);
+  assert.ok(!pro.includes('\x1b[33m'), pro);
+});
+
 test('config: user lines replace defaults, nested keys merge', () => {
   const cfg = deepMerge(config.DEFAULTS, { lines: [['model']], colors: { model: 'red' } });
   assert.deepEqual(cfg.lines, [['model']]);
