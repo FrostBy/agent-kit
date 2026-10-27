@@ -78,6 +78,11 @@ function apply(text, s = state()) {
     try { row = JSON.parse(line); } catch { continue; }
     const p = row?.payload;
     if (!p || typeof p !== 'object') continue;
+    if (['event_msg', 'response_item', 'turn_context'].includes(row.type)) {
+      const at = Date.parse(row.timestamp);
+      if (Number.isFinite(at)) s.updatedAt = at;
+      s.done = row.type === 'event_msg' && ['task_complete', 'task_completed', 'turn_aborted'].includes(p.type);
+    }
     if (row.type === 'session_meta') s.meta = p;
     if (row.type === 'turn_context') s.context = p;
     if (row.type === 'event_msg') {
@@ -196,34 +201,34 @@ function modelDisplayName(slug, home) {
 }
 
 function load(root, now = Date.now(), home = CODEX_DIR, accepts = () => true, scratchpad) {
-  const selected = broker.agents(scratchpad, 'codex', accepts);
+  const selected = broker.agents(scratchpad, 'codex');
   if (selected.length) {
     const files = [...sessionFiles(path.join(home, 'sessions'))];
-    const agents = selected.map((agent) => {
+    const agents = broker.select(selected.map((agent) => {
       const file = files.find((p) => path.basename(p).endsWith(`-${agent.id}.jsonl`));
-      return file ? loadFile(root, now, home, file, agent.updatedAt, agent) : null;
-    }).filter(Boolean);
+      return file ? loadFile(root, now, home, file, agent) : null;
+    }), accepts);
     if (agents.length) return { agents };
   }
   try {
     const file = findSession({ home, root, threadId: '', execOnly: true });
     if (!file) return null;
-    const updatedAt = fs.statSync(file).mtimeMs;
-    return accepts(updatedAt) ? loadFile(root, now, home, file, updatedAt) : null;
+    const result = loadFile(root, now, home, file);
+    return result && Number.isFinite(result.updatedAt) && accepts(result.updatedAt) ? result : null;
   } catch { return null; }
 }
 
-function loadFile(root, now, home, file, updatedAt, agent) {
+function loadFile(root, now, home, file, agent) {
   try {
     const data = cache.incremental(file, () => ({ ...state(), limits: [], pending: [], agents: [] }), (text, data) => {
       for (const key of ['limits', 'pending', 'agents']) data[key] = new Map(data[key]);
       apply(text, data);
       for (const key of ['limits', 'pending', 'agents']) data[key] = [...data[key]];
       return data;
-    });
+    }, 1);
     for (const key of ['limits', 'pending', 'agents']) data[key] = new Map(data[key]);
     const out = snapshot(data, root, now);
     out.input.model.display_name = clean(modelDisplayName(out.input.model.display_name || agent?.model, home));
-    return { input: out.input, updatedAt, name: agent ? clean(agent.name) : undefined };
+    return { input: out.input, updatedAt: data.updatedAt, done: data.done, name: agent ? clean(agent.name) : undefined };
   } catch { return null; }
 }

@@ -43,9 +43,10 @@ function parsedFile(filename, parse) {
   return data;
 }
 
-function incremental(filename, initial, reduce) {
+function incremental(filename, initial, reduce, version) {
   const st = fs.statSync(filename), key = keyFor('log', filename);
   let c = read(key);
+  if (version !== undefined && c?.version !== version) c = null;
   if (c?.size === st.size && c.mtime === st.mtimeMs && c.ino === st.ino) return c.data;
   if (!c || c.ino !== st.ino || st.size < c.size || (st.size === c.size && st.mtimeMs !== c.mtime)) c = { offset: 0, data: initial() };
   const fd = fs.openSync(filename, 'r');
@@ -65,7 +66,7 @@ function incremental(filename, initial, reduce) {
       }
     }
   } finally { fs.closeSync(fd); }
-  writeRaw(key, { ...c, size: st.size, mtime: st.mtimeMs, ino: st.ino });
+  writeRaw(key, { ...c, version, size: st.size, mtime: st.mtimeMs, ino: st.ino });
   return c.data;
 }
 

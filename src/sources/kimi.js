@@ -27,10 +27,10 @@ function load(root, now = Date.now(), home = path.join(HOME, '.kimi-code'), acce
   try {
     const sessions = path.join(home, 'sessions');
     const workspaces = fs.readdirSync(sessions, { withFileTypes: true }).filter((w) => w.isDirectory());
-    const agents = broker.agents(scratchpad, 'kimi', accepts).map((agent) => {
+    const agents = broker.select(broker.agents(scratchpad, 'kimi').map((agent) => {
       const dir = workspaces.map((w) => path.join(sessions, w.name, agent.id)).find((p) => fs.existsSync(p));
       return dir ? loadSession({ dir, ...agent }, now, home) : null;
-    }).filter(Boolean);
+    }), accepts);
     if (agents.length) return { agents };
     let selected = null;
     for (const workspace of workspaces) {
@@ -45,8 +45,8 @@ function load(root, now = Date.now(), home = path.join(HOME, '.kimi-code'), acce
         if (!selected || updatedAt > selected.updatedAt) selected = { dir: sessionDir, updatedAt };
       }
     }
-    if (!selected || !accepts(selected.updatedAt)) return null;
-    return loadSession(selected, now, home);
+    const result = selected && loadSession(selected, now, home);
+    return result && Number.isFinite(result.updatedAt) && accepts(result.updatedAt) ? result : null;
   } catch { return null; }
 }
 
@@ -54,12 +54,14 @@ function loadSession(selected, now, home) {
   try {
     const file = path.join(selected.dir, 'agents', 'main', 'wire.jsonl');
     const parsed = cache.incremental(file, () => ({ limitedAt: 0, usage: null }), (text, previous) => {
-    let { model, effort, used, limitedAt, limitWindow, usage } = previous;
+    let { model, effort, used, limitedAt, limitWindow, usage, updatedAt, done } = previous;
     for (const line of text.split('\n')) {
-      if (!/profile\.bind|llm\.request|usage\.record|token_counting\.measured|rate_limited|APIProviderQuotaExhaustedError/.test(line)) continue;
       let row;
       try { row = JSON.parse(line); } catch { continue; }
       if (!row || typeof row !== 'object') continue;
+      if (Number.isFinite(row.time)) updatedAt = row.time;
+      if (row.type === 'turn.ended') done = true;
+      if (['turn.prompt', 'agent.turn.started'].includes(row.type)) done = false;
       if (['profile.bind', 'llm.request'].includes(row.type)) {
         if (typeof row.modelAlias === 'string') model = row.modelAlias;
         if (typeof row.thinkingEffort === 'string') effort = row.thinkingEffort;
@@ -81,15 +83,15 @@ function loadSession(selected, now, home) {
         limitWindow = message.includes('5-hour') ? '5h' : message.includes('month') ? 'month' : '';
       }
     }
-    return { model, effort, used, limitedAt, limitWindow, usage };
-    });
+    return { model, effort, used, limitedAt, limitWindow, usage, updatedAt, done };
+    }, 1);
     const { effort, used, limitedAt, limitWindow, usage } = parsed;
     const model = parsed.model || selected.model;
     let config;
     try { config = contextSize(home, model); } catch { /* Missing config only hides context percent. */ }
     const size = config?.size;
     const modelName = clean(config?.display_name) || clean(model?.split('/').pop());
-    return { name: selected.name ? clean(selected.name) : undefined, updatedAt: selected.updatedAt, limitWindow, limited: limitedAt > 0 && now >= limitedAt && now - limitedAt <= (limitWindow === '5h' ? 5 * 3600000 : 30 * 86400000),
+    return { name: selected.name ? clean(selected.name) : undefined, updatedAt: parsed.updatedAt, done: parsed.done, limitWindow, limited: limitedAt > 0 && now >= limitedAt && now - limitedAt <= (limitWindow === '5h' ? 5 * 3600000 : 30 * 86400000),
       input: { model: { display_name: modelName }, effort: { level: clean(effort) }, token_usage: usage,
         context_window: size > 0 && used != null ? { context_window_size: size, used_tokens: used, used_percentage: used / size * 100 } : null } };
   } catch { return null; }

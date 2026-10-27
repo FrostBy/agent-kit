@@ -15,7 +15,7 @@ test('external executors: local fixtures, usage, context, quotas, filtering and 
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const root = path.join(home, 'work'), now = Date.now();
   const write = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, value); };
-  const rows = (values) => values.map((v) => JSON.stringify(v)).join('\n') + '\n';
+  const rows = (values) => values.map((v) => JSON.stringify({ timestamp: new Date(now).toISOString(), ...v })).join('\n') + '\n';
   const cfile = path.join(home, 'sessions', 'rollout-1.jsonl');
   write(cfile, rows([
     { type: 'session_meta', payload: { cwd: root, originator: 'codex_exec', source: 'exec' } },
@@ -82,7 +82,7 @@ test('codex: model display name from models_cache.json, slug as fallback', async
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, [
     { type: 'session_meta', payload: { cwd: root, source: 'exec' } },
-    { type: 'turn_context', payload: { model: 'gpt-sol' } },
+    { type: 'turn_context', timestamp: new Date(now).toISOString(), payload: { model: 'gpt-sol' } },
   ].map((v) => JSON.stringify(v)).join('\n') + '\n');
   assert.equal(codex.load(root, now, home).input.model.display_name, 'gpt-sol');
   fs.writeFileSync(path.join(home, 'models_cache.json'), JSON.stringify({ models: [{ slug: 'gpt-sol', display_name: 'Sol Pro' }, { slug: 'other', display_name: 'Other' }] }));
@@ -104,7 +104,7 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   const rollout = (id, source, model, extra = {}) => write(path.join(home, 'sessions', `rollout-${id}.jsonl`), [
     { type: 'session_meta', payload: { cwd: root, source, originator: source === 'exec' ? 'codex_exec' : 'codex-tui', ...extra } },
     { type: 'turn_context', payload: { model, effort: 'high' } },
-    { type: 'event_msg', payload: { type: 'token_count', info: { model_context_window: 1000, last_token_usage: { total_tokens: 250 }, total_token_usage: { input_tokens: 2000 } }, rate_limits: { secondary: { used_percent: 30, window_minutes: 10080 } } } },
+    { type: 'event_msg', timestamp: new Date(now - (id === 'thread-first' ? 2000 : 1000)).toISOString(), payload: { type: 'token_count', info: { model_context_window: 1000, last_token_usage: { total_tokens: 250 }, total_token_usage: { input_tokens: 2000 } }, rate_limits: { secondary: { used_percent: 30, window_minutes: 10080 } } } },
   ].map((v) => JSON.stringify(v)).join('\n') + '\n', 3 * 3600000);
   const first = rollout('thread-first', 'vscode', 'Sol', { cwd: home + '-elsewhere' });
   rollout('thread-second', 'vscode', 'Luna');
@@ -120,8 +120,8 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   };
   const output = async (over) => (await render(input, cfg(over), now, sources)).join('\n');
   let out = await output();
-  assert.match(out, /^codex dry2 Sol high/);
-  assert.doesNotMatch(out, /slice|booting/);
+  assert.match(out, /^codex slice Luna high.* · dry2 Sol high/);
+  assert.doesNotMatch(out, /booting/);
   assert.match(out, /ctx .*25%.*7d/);
   state('slice', 'codex', 'running', 'thread-second', 1000);
   out = await output({ widgets: { codex: { tokens: true } } });
@@ -143,10 +143,9 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   for (const file of extras) fs.rmSync(file);
   state('dry2', 'codex', 'idle', 'thread-first', 2000);
   state('slice', 'codex', 'idle', 'thread-second', 1000);
-  assert.match(await output(), /^codex slice Luna/);
-  assert.doesNotMatch(await output(), /dry2/);
+  assert.match(await output(), /^codex slice Luna.*dry2/);
   state('dry2', 'codex', 'starting', 'thread-first', 2000);
-  assert.match(await output(), /^codex dry2 Updated/);
+  assert.match(await output(), /dry2 Updated/);
   state('dry2', 'codex', 'done', 'thread-first');
   state('slice', 'codex', 'error', 'thread-second');
   const exec = rollout('aaa-exec', 'exec', 'Exec');
@@ -167,7 +166,7 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   write(path.join(dir, 'state.json'), JSON.stringify({ cwd: home + '-elsewhere', updatedAt: now - 3 * 3600000 }));
   write(path.join(dir, 'agents', 'main', 'wire.jsonl'), [
     { type: 'profile.bind', modelAlias: 'kimi-code/K2.8', thinkingEffort: 'medium' },
-    { type: 'token_counting.measured', tokens: 500 },
+    { type: 'token_counting.measured', tokens: 500, time: now },
   ].map((v) => JSON.stringify(v)).join('\n') + '\n');
   state('moon', 'kimi', 'running', sessionId);
   assert.equal(await output(), 'kimi moon K2.8 medium');
@@ -175,6 +174,43 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   assert.equal(kimi.load(root, now + 120000, home, (at) => now + 120000 - at <= 60000, scratchpad), null);
   state('moon', 'kimi', 'done', sessionId);
   assert.equal(await output(), '');
+});
+
+test('broker freshness follows turn events, including incremental updates and fallback', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'broker-freshness-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const now = Date.now(), root = path.join(home, 'work'), scratchpad = path.join(home, 'scratchpad');
+  const write = (file, rows) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, rows.map(JSON.stringify).join('\n') + '\n'); };
+  const state = (name, agent, id) => write(path.join(scratchpad, `${name}.state.json`), [{ agent, status: 'running', [agent === 'codex' ? 'threadId' : 'sessionId']: id }]);
+  const event = (type, age) => ({ type: 'event_msg', timestamp: new Date(now - age * 60000).toISOString(), payload: { type } });
+  const file = path.join(home, 'sessions', 'rollout-thread.jsonl');
+  write(file, [{ type: 'session_meta', payload: { cwd: root, source: 'vscode' } }, event('task_complete', 30)]);
+  state('old', 'codex', 'thread');
+  const input = { workspace: { project_dir: root }, scratchpad_dir: scratchpad };
+  const config = deepMerge(DEFAULTS, { color: false, lines: [['codex'], ['kimi']] });
+  const sources = { codex: (accepts) => codex.load(root, now, home, accepts, scratchpad), kimi: (accepts) => kimi.load(root, now, home, accepts, scratchpad) };
+  const output = async () => (await render(input, config, now, sources)).join('\n');
+  assert.equal(await output(), '');
+  fs.appendFileSync(file, JSON.stringify(event('task_started', 1)) + '\n');
+  assert.match(await output(), /codex old/);
+  fs.appendFileSync(file, JSON.stringify(event('task_complete', 2)) + '\n');
+  assert.match(await output(), /codex old/);
+  const active = path.join(home, 'sessions', 'rollout-active.jsonl');
+  write(active, [{ type: 'session_meta', payload: { cwd: root, source: 'vscode' } }, event('task_started', 3)]);
+  state('active', 'codex', 'active');
+  assert.match(await output(), /codex active/);
+  assert.doesNotMatch(await output(), /old/);
+  fs.appendFileSync(file, JSON.stringify(event('agent_message', 1)) + '\n');
+  assert.match(await output(), /old.*active/);
+  fs.rmSync(path.join(scratchpad, 'active.state.json'));
+  fs.appendFileSync(file, JSON.stringify(event('turn_aborted', 30)) + '\n');
+  assert.equal(await output(), '');
+  const wire = path.join(home, 'sessions', 'workspace', 'session_kimi', 'agents', 'main', 'wire.jsonl');
+  write(wire, [{ type: 'turn.ended', time: now - 30 * 60000 }]);
+  state('moon', 'kimi', 'session_kimi');
+  assert.equal(await output(), '');
+  fs.appendFileSync(wire, JSON.stringify({ type: 'turn.prompt', time: now }) + '\n');
+  assert.match(await output(), /kimi moon/);
 });
 
 test('Kimi quota flags use the error message and expire from the event time', async (t) => {

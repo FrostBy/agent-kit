@@ -272,10 +272,10 @@ def({ id: 'cmd', group: 'misc', desc: { en: 'Output of your own command (cached)
 
 for (const id of ['codex', 'kimi']) {
   def({ id, group: 'session', desc: { en: id + ' executor: model, context, tokens and limits', ru: id + ': модель, контекст, токены и лимиты' }, needs: [id],
-    opts: { tokens: bool(false, { en: 'Session token totals', ru: 'Токены сессии' }), exclude: str('', { en: 'Hide in paths separated by ;', ru: 'Скрывать в путях через ;' }), maxAge: num(120, 0, 10080, { en: 'Maximum session age, minutes', ru: 'Макс. возраст сессии, мин' }) },
+    opts: { tokens: bool(false, { en: 'Session token totals', ru: 'Токены сессии' }), exclude: str('', { en: 'Hide in paths separated by ;', ru: 'Скрывать в путях через ;' }), maxAge: num(120, 0, 10080, { en: 'Maximum session age, minutes', ru: 'Макс. возраст сессии, мин' }), idleAfter: num(10, 0, 10080, { en: 'Hide after inactivity, minutes', ru: 'Скрывать после бездействия, мин' }) },
     accepts: (d, o, updatedAt = d.now) => {
       const root = d.in.workspace?.project_dir || d.in.workspace?.current_dir || d.in.cwd || process.cwd();
-      return d.in.harness !== 'codex' && d.now - updatedAt <= o.maxAge * 60000
+      return d.in.harness !== 'codex' && d.now - updatedAt <= Math.min(o.maxAge, o.idleAfter) * 60000
         && !o.exclude.split(';').some((p) => p.trim() && isInside(root, p.trim()));
     },
     render: (d, o, t) => {

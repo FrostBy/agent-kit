@@ -1,6 +1,6 @@
 {
   "name": "agent-statusline",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Status line for Claude Code and a native footer for patched Codex CLI: context, quotas, git across umbrella folders, runtime activity. Zero Node dependencies.",
   "bin": { "agent-statusline": "statusline.js", "claude-statusline-ultimate": "statusline.js" },
   "main": "statusline.js",
