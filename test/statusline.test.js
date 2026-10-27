@@ -2,6 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { spawnSync } = require('child_process');
 const config = require('../src/config');
 const { render, renderLines } = require('../src/render');
 const { sample, sampleSources } = require('../src/sample');
@@ -20,6 +23,38 @@ const umbrella = (root) => ({
     { dir: path.join(root, 'web'), branch: 'main', ahead: 0, behind: 0, changed: 1, untracked: 0, conflicts: 0, add: 5, del: 0, stash: 0 },
     { dir: path.join(root, 'infra'), branch: 'main', ahead: 0, behind: 0, changed: 0, untracked: 0, conflicts: 0, add: 0, del: 0, stash: 0 },
   ],
+});
+
+test('context uses Claude autoCompactWindow settings with project and model precedence', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'context-settings-'));
+  const user = path.join(root, 'user'), project = path.join(root, 'project');
+  const local = path.join(project, '.claude');
+  fs.mkdirSync(user, { recursive: true });
+  fs.mkdirSync(local, { recursive: true });
+  const run = () => {
+    const input = { model: { id: 'test-model' }, workspace: { project_dir: project }, context_window: { context_window_size: 1_000_000, used_percentage: 22, current_usage: { input_tokens: 17_000, cache_read_input_tokens: 200_000 }, total_input_tokens: 999_999 } };
+    const result = spawnSync(process.execPath, [path.join(__dirname, '..', 'statusline.js')], { input: JSON.stringify(input), encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: user, AGENT_STATUSLINE_CONFIG: path.join(root, 'config.json'), NO_COLOR: '1' } });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const write = (file, value) => fs.writeFileSync(file, JSON.stringify(value));
+  try {
+    write(path.join(root, 'config.json'), { lines: [['context']], color: false, gapAfter: false });
+    assert.match(run(), /22%.*217k\/1M/);
+    write(path.join(user, 'settings.json'), { autoCompactWindow: 500_000 });
+    assert.match(run(), /43%.*217k\/500k/);
+    write(path.join(user, 'settings.json'), { autoCompactWindow: 500_000, modelSettings: { 'test-model': { autoCompactWindow: 400_000 } } });
+    assert.match(run(), /54%.*217k\/400k/);
+    write(path.join(local, 'settings.json'), { autoCompactWindow: 600_000 });
+    write(path.join(local, 'settings.local.json'), { autoCompactWindow: 300_000 });
+    assert.match(run(), /72%.*217k\/300k/);
+    fs.writeFileSync(path.join(local, 'settings.local.json'), '{');
+    assert.match(run(), /36%.*217k\/600k/);
+    write(path.join(local, 'settings.local.json'), { autoCompactWindow: 0 });
+    assert.match(run(), /22%.*217k\/1M/);
+    write(path.join(local, 'settings.local.json'), { autoCompactWindow: 2_000_000 });
+    assert.match(run(), /22%.*217k\/1M/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('full render: headline blocks present, money hidden on a subscription', async () => {

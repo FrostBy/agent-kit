@@ -159,7 +159,7 @@ Kimi показывает `limit 5h` в течение 5 часов после �
 
 | id | описание | опции |
 |---|---|---|
-| `context` | Контекст: полоска, %, занято/окно | `label="ctx", bar=5, percent=true, used=true, left=false` |
+| `context` | Контекст: полоска, %, занято/окно; учитывает `autoCompactWindow` Claude | `label="ctx", bar=5, percent=true, used=true, left=false` |
 | `context-breakdown` | Контекст по типам: свежий ввод / чтение кэша / запись кэша |  |
 
 #### Лимиты

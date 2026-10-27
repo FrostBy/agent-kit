@@ -45,6 +45,7 @@ async function loadData(input, config, now, sources = {}) {
     plan: needs.has('plan') ? s.plan() : null,
     transcript: needs.has('transcript') ? s.transcript() : null,
     today: needs.has('today') ? s.today() : null,
+    autoCompactWindow: needs.has('settings') && input.harness !== 'codex' ? require('./sources/settings').autoCompactWindow(cwd, input.model?.id) : null,
   };
   data.paying = config.money === 'always' || paying(input, data.plan, data.usage);
   return data;

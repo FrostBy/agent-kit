@@ -159,7 +159,7 @@ Kimi shows `limit 5h` for 5 hours after a 5-hour quota error; `limit month` (mon
 
 | id | description | options |
 |---|---|---|
-| `context` | Context: bar, %, used/window | `label="ctx", bar=5, percent=true, used=true, left=false` |
+| `context` | Context: bar, %, used/window; accounts for Claude's `autoCompactWindow` | `label="ctx", bar=5, percent=true, used=true, left=false` |
 | `context-breakdown` | Context by type: fresh input / cache read / cache write |  |
 
 #### Limits

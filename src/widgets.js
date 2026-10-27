@@ -8,15 +8,16 @@ const bool = (d, desc) => ({ type: 'bool', default: d, desc });
 const num = (d, min, max, desc) => ({ type: 'number', default: d, min, max, desc });
 const str = (d, desc) => ({ type: 'string', default: d, desc });
 
-function contextText(cw, o, t) {
+function contextText(cw, o, t, autoCompactWindow) {
   if (cw?.used_percentage == null) return null;
-  const pct = Math.round(cw.used_percentage);
+  const originalSize = cw.context_window_size;
+  const u = cw.current_usage;
+  const used = cw.used_tokens ?? (u ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : originalSize * cw.used_percentage / 100);
+  const size = autoCompactWindow > 0 && originalSize > 0 ? Math.min(originalSize, autoCompactWindow) : originalSize;
+  const pct = Math.round(autoCompactWindow > 0 && size > 0 ? used / size * 100 : cw.used_percentage);
   const parts = [o.label && t.paint('muted', o.label)].filter(Boolean);
   if (o.bar) parts.push(t.sev(pct, bar(pct, o.bar, t.icon('barFull'), t.icon('barEmpty'))));
   if (o.percent) parts.push(t.sev(pct, `${pct}%`));
-  const size = cw.context_window_size;
-  const u = cw.current_usage;
-  const used = cw.used_tokens ?? (u ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : size * cw.used_percentage / 100);
   if (size && o.used) parts.push(t.paint('muted', `${tokens(used)}/${tokens(size)}`));
   if (size && o.left) parts.push(t.paint('muted', `${tokens(Math.max(0, size - used))} left`));
   return parts.join(' ');
@@ -87,9 +88,10 @@ def({ id: 'permission-mode', group: 'session', desc: { en: 'Permission mode, if 
 } });
 
 def({ id: 'context', group: 'context', desc: { en: 'Context: bar, %, used/window', ru: 'Контекст: полоска, %, занято/окно' },
+  needs: ['settings'],
   opts: { label: str('ctx', { en: 'Label', ru: 'Подпись' }), bar: num(5, 0, 40, { en: 'Bar width, 0 — none', ru: 'Ширина полоски, 0 — без неё' }), percent: bool(true, { en: 'Percent', ru: 'Процент' }), used: bool(true, { en: 'Tokens used / window size', ru: 'Занято токенов / размер окна' }), left: bool(false, { en: 'Tokens left', ru: 'Сколько токенов осталось' }) },
   render: (d, o, t) => {
-    return contextText(d.in.context_window, o, t);
+    return contextText(d.in.context_window, o, t, d.autoCompactWindow);
   } });
 def({ id: 'context-breakdown', group: 'context', desc: { en: 'Context by type: fresh input / cache read / cache write', ru: 'Контекст по типам: свежий ввод / чтение кэша / запись кэша' }, render: (d, o, t) => {
   const u = d.in.context_window?.current_usage;
