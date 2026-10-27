@@ -4,6 +4,7 @@ const path = require('path');
 const { HOME, readJson } = require('../util');
 const { samePath, clean } = require('./codex');
 const cache = require('../cache');
+const broker = require('./broker');
 
 function contextSize(home, alias) {
   let section = '', size, displayName;
@@ -22,12 +23,17 @@ function contextSize(home, alias) {
   return size == null && displayName == null ? null : { size, display_name: displayName };
 }
 
-function load(root, now = Date.now(), home = path.join(HOME, '.kimi-code'), accepts = () => true) {
+function load(root, now = Date.now(), home = path.join(HOME, '.kimi-code'), accepts = () => true, scratchpad) {
   try {
     const sessions = path.join(home, 'sessions');
+    const workspaces = fs.readdirSync(sessions, { withFileTypes: true }).filter((w) => w.isDirectory());
+    const agents = broker.agents(scratchpad, 'kimi', accepts).map((agent) => {
+      const dir = workspaces.map((w) => path.join(sessions, w.name, agent.id)).find((p) => fs.existsSync(p));
+      return dir ? loadSession({ dir, ...agent }, now, home) : null;
+    }).filter(Boolean);
+    if (agents.length) return { agents };
     let selected = null;
-    for (const workspace of fs.readdirSync(sessions, { withFileTypes: true })) {
-      if (!workspace.isDirectory()) continue;
+    for (const workspace of workspaces) {
       const dir = path.join(sessions, workspace.name);
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (!entry.isDirectory() || !entry.name.startsWith('session_')) continue;
@@ -40,6 +46,12 @@ function load(root, now = Date.now(), home = path.join(HOME, '.kimi-code'), acce
       }
     }
     if (!selected || !accepts(selected.updatedAt)) return null;
+    return loadSession(selected, now, home);
+  } catch { return null; }
+}
+
+function loadSession(selected, now, home) {
+  try {
     const file = path.join(selected.dir, 'agents', 'main', 'wire.jsonl');
     const parsed = cache.incremental(file, () => ({ limitedAt: 0, usage: null }), (text, previous) => {
     let { model, effort, used, limitedAt, limitWindow, usage } = previous;
@@ -71,12 +83,13 @@ function load(root, now = Date.now(), home = path.join(HOME, '.kimi-code'), acce
     }
     return { model, effort, used, limitedAt, limitWindow, usage };
     });
-    const { model, effort, used, limitedAt, limitWindow, usage } = parsed;
+    const { effort, used, limitedAt, limitWindow, usage } = parsed;
+    const model = parsed.model || selected.model;
     let config;
     try { config = contextSize(home, model); } catch { /* Missing config only hides context percent. */ }
     const size = config?.size;
     const modelName = clean(config?.display_name) || clean(model?.split('/').pop());
-    return { updatedAt: selected.updatedAt, limitWindow, limited: limitedAt > 0 && now >= limitedAt && now - limitedAt <= (limitWindow === '5h' ? 5 * 3600000 : 30 * 86400000),
+    return { name: selected.name ? clean(selected.name) : undefined, updatedAt: selected.updatedAt, limitWindow, limited: limitedAt > 0 && now >= limitedAt && now - limitedAt <= (limitWindow === '5h' ? 5 * 3600000 : 30 * 86400000),
       input: { model: { display_name: modelName }, effort: { level: clean(effort) }, token_usage: usage,
         context_window: size > 0 && used != null ? { context_window_size: size, used_tokens: used, used_percentage: used / size * 100 } : null } };
   } catch { return null; }

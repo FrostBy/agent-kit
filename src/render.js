@@ -24,8 +24,8 @@ async function loadData(input, config, now, sources = {}) {
     plan: () => usageSrc.plan(),
     transcript: () => transcriptSrc.load(input.transcript_path),
     today: () => todaySrc.load(now, config.todayTtl),
-    codex: (accepts) => require('./sources/codex').load(cwd, now, undefined, accepts),
-    kimi: (accepts) => require('./sources/kimi').load(cwd, now, undefined, accepts),
+    codex: (accepts) => require('./sources/codex').load(cwd, now, undefined, accepts, input.scratchpad_dir),
+    kimi: (accepts) => require('./sources/kimi').load(cwd, now, undefined, accepts, input.scratchpad_dir),
     ...sources,
   };
   const external = (id) => {

@@ -18,7 +18,7 @@ test('external executors: local fixtures, usage, context, quotas, filtering and 
   const rows = (values) => values.map((v) => JSON.stringify(v)).join('\n') + '\n';
   const cfile = path.join(home, 'sessions', 'rollout-1.jsonl');
   write(cfile, rows([
-    { type: 'session_meta', payload: { cwd: root, originator: 'codex_exec' } },
+    { type: 'session_meta', payload: { cwd: root, originator: 'codex_exec', source: 'exec' } },
     { type: 'turn_context', payload: { model: 'sol', effort: 'high' } },
     { type: 'event_msg', payload: { type: 'token_count', info: { model_context_window: 1000, last_token_usage: { total_tokens: 250 }, total_token_usage: { input_tokens: 2000, output_tokens: 100 } }, rate_limits: { primary: { used_percent: 20, window_minutes: 300, resets_at: now / 1000 + 3600 }, secondary: { used_percent: 30, window_minutes: 10080 } } } },
   ]));
@@ -81,12 +81,100 @@ test('codex: model display name from models_cache.json, slug as fallback', async
   const file = path.join(home, 'sessions', 'rollout-1.jsonl');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, [
-    { type: 'session_meta', payload: { cwd: root } },
+    { type: 'session_meta', payload: { cwd: root, source: 'exec' } },
     { type: 'turn_context', payload: { model: 'gpt-sol' } },
   ].map((v) => JSON.stringify(v)).join('\n') + '\n');
   assert.equal(codex.load(root, now, home).input.model.display_name, 'gpt-sol');
   fs.writeFileSync(path.join(home, 'models_cache.json'), JSON.stringify({ models: [{ slug: 'gpt-sol', display_name: 'Sol Pro' }, { slug: 'other', display_name: 'Other' }] }));
   assert.equal(codex.load(root, now, home).input.model.display_name, 'Sol Pro');
+});
+
+test('broker executors: session IDs, running priority, shared quotas and exec fallback', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'broker-executors-test-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const root = path.join(home, 'work'), scratchpad = path.join(home, 'scratchpad'), now = Date.now();
+  const write = (file, value, age = 0) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, value);
+    fs.utimesSync(file, (now - age) / 1000, (now - age) / 1000);
+    return file;
+  };
+  const state = (name, agent, status, id, age = 0) => write(path.join(scratchpad, `${name}.state.json`),
+    JSON.stringify({ agent, status, [agent === 'codex' ? 'threadId' : 'sessionId']: id, model: 'state-model' }), age);
+  const rollout = (id, source, model, extra = {}) => write(path.join(home, 'sessions', `rollout-${id}.jsonl`), [
+    { type: 'session_meta', payload: { cwd: root, source, originator: source === 'exec' ? 'codex_exec' : 'codex-tui', ...extra } },
+    { type: 'turn_context', payload: { model, effort: 'high' } },
+    { type: 'event_msg', payload: { type: 'token_count', info: { model_context_window: 1000, last_token_usage: { total_tokens: 250 }, total_token_usage: { input_tokens: 2000 } }, rate_limits: { secondary: { used_percent: 30, window_minutes: 10080 } } } },
+  ].map((v) => JSON.stringify(v)).join('\n') + '\n', 3 * 3600000);
+  const first = rollout('thread-first', 'vscode', 'Sol', { cwd: home + '-elsewhere' });
+  rollout('thread-second', 'vscode', 'Luna');
+  state('dry2', 'codex', 'running', 'thread-first', 2000);
+  state('slice', 'codex', 'idle', 'thread-second', 1000);
+  state('booting', 'codex', 'starting', undefined);
+  write(path.join(scratchpad, 'broken.state.json'), '{broken');
+  const input = { workspace: { project_dir: root }, scratchpad_dir: scratchpad };
+  const cfg = (over = {}) => deepMerge(DEFAULTS, { color: false, links: false, lines: [['codex'], ['kimi']], ...over });
+  const sources = {
+    codex: (accepts) => codex.load(root, now, home, accepts, scratchpad),
+    kimi: (accepts) => kimi.load(root, now, home, accepts, scratchpad),
+  };
+  const output = async (over) => (await render(input, cfg(over), now, sources)).join('\n');
+  let out = await output();
+  assert.match(out, /^codex dry2 Sol high/);
+  assert.doesNotMatch(out, /slice|booting/);
+  assert.match(out, /ctx .*25%.*7d/);
+  state('slice', 'codex', 'running', 'thread-second', 1000);
+  out = await output({ widgets: { codex: { tokens: true } } });
+  assert.match(out, /^codex slice Luna high.* · dry2 Sol high/);
+  assert.equal((out.match(/7d/g) || []).length, 1);
+  assert.match(out, /in 2k out 0 cache 0/);
+  assert.ok(out.indexOf('7d') > out.indexOf('dry2'));
+  const originalRead = fs.readSync;
+  fs.readSync = () => assert.fail('unchanged broker rollout read');
+  try { assert.equal(codex.load(root, now, home, () => true, scratchpad).agents.length, 2); }
+  finally { fs.readSync = originalRead; }
+  fs.appendFileSync(first, JSON.stringify({ type: 'turn_context', payload: { model: 'Updated' } }) + '\n');
+  fs.utimesSync(first, (now - 3 * 3600000) / 1000, (now - 3 * 3600000) / 1000);
+  assert.match(await output(), /dry2 Updated/);
+  assert.equal(codex.load(root, now + 120000, home, (at) => now + 120000 - at <= 60000, scratchpad), null);
+  assert.equal(await output({ widgets: { codex: { exclude: root } } }), '');
+  const extras = ['third', 'fourth'].map((name) => state(name, 'codex', 'running', 'thread-first'));
+  assert.equal(codex.load(root, now, home, () => true, scratchpad).agents.length, 3);
+  for (const file of extras) fs.rmSync(file);
+  state('dry2', 'codex', 'idle', 'thread-first', 2000);
+  state('slice', 'codex', 'idle', 'thread-second', 1000);
+  assert.match(await output(), /^codex slice Luna/);
+  assert.doesNotMatch(await output(), /dry2/);
+  state('dry2', 'codex', 'starting', 'thread-first', 2000);
+  assert.match(await output(), /^codex dry2 Updated/);
+  state('dry2', 'codex', 'done', 'thread-first');
+  state('slice', 'codex', 'error', 'thread-second');
+  const exec = rollout('aaa-exec', 'exec', 'Exec');
+  fs.utimesSync(exec, now / 1000, now / 1000);
+  rollout('zzz-vscode', 'vscode', 'Wrong');
+  rollout('zzzz-child', 'exec', 'Child', { parent_thread_id: 'parent' });
+  rollout('zzzzz-subagent', { subagent: 'parent' }, 'Subagent');
+  assert.match(await output(), /^codex Exec high/);
+  assert.doesNotMatch(await output(), /dry2|slice|Wrong|Child|Subagent/);
+  assert.equal(codex.load(root, now, home, () => true, path.join(home, 'missing')).input.model.display_name, 'Exec');
+  assert.equal(codex.findSession({ home, root, threadId: '' }).endsWith('rollout-zzz-vscode.jsonl'), true);
+  fs.rmSync(exec);
+  assert.equal(codex.load(root, now, home, () => true, scratchpad), null);
+  assert.equal(codex.load(root, now, home, () => true, path.join(home, 'missing')), null);
+
+  const sessionId = 'session_12345678-1234-1234-1234-123456789abc';
+  const dir = path.join(home, 'sessions', 'kimi-workspace', sessionId);
+  write(path.join(dir, 'state.json'), JSON.stringify({ cwd: home + '-elsewhere', updatedAt: now - 3 * 3600000 }));
+  write(path.join(dir, 'agents', 'main', 'wire.jsonl'), [
+    { type: 'profile.bind', modelAlias: 'kimi-code/K2.8', thinkingEffort: 'medium' },
+    { type: 'token_counting.measured', tokens: 500 },
+  ].map((v) => JSON.stringify(v)).join('\n') + '\n');
+  state('moon', 'kimi', 'running', sessionId);
+  assert.equal(await output(), 'kimi moon K2.8 medium');
+  assert.equal(await output({ widgets: { kimi: { exclude: root } } }), '');
+  assert.equal(kimi.load(root, now + 120000, home, (at) => now + 120000 - at <= 60000, scratchpad), null);
+  state('moon', 'kimi', 'done', sessionId);
+  assert.equal(await output(), '');
 });
 
 test('Kimi quota flags use the error message and expire from the event time', async (t) => {

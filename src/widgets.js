@@ -278,13 +278,19 @@ for (const id of ['codex', 'kimi']) {
     },
     render: (d, o, t) => {
       const source = d[id];
-      if (!source || !byId[id].accepts(d, o, source.updatedAt)) return null;
-      const input = source.input, u = input.token_usage;
-      const parts = [[input.model?.display_name && t.paint('model', input.model.display_name), input.effort?.level && t.paint('muted', input.effort.level)].filter(Boolean).join(' '),
-        contextText(input.context_window, optsFor(byId.context, {}), t),
-        o.tokens && u && t.paint('muted', 'in ' + tokens(u.input_tokens || 0) + ' out ' + tokens(u.output_tokens || 0) + ' cache ' + tokens(u.cached_input_tokens || 0)),
-        ...(input.quota_windows || []).map((w) => limitText(t, w.label, w.used_percentage, w.resets_at, w.window_seconds, d.now, optsFor(byId['limit-5h'], {}))),
-        source.limited && t.paint('crit', source.limitWindow ? `limit ${source.limitWindow}` : 'limit')].filter(Boolean);
+      if (!source) return null;
+      const agents = (source.agents || [source]).filter((a) => byId[id].accepts(d, o, a.updatedAt));
+      const rendered = agents.map((agent) => {
+        const input = agent.input, u = input.token_usage;
+        const parts = [[agent.name && t.paint('muted', agent.name), input.model?.display_name && t.paint('model', input.model.display_name), input.effort?.level && t.paint('muted', input.effort.level)].filter(Boolean).join(' '),
+          contextText(input.context_window, optsFor(byId.context, {}), t),
+          o.tokens && u && t.paint('muted', 'in ' + tokens(u.input_tokens || 0) + ' out ' + tokens(u.output_tokens || 0) + ' cache ' + tokens(u.cached_input_tokens || 0)),
+          agent.limited && t.paint('crit', agent.limitWindow ? `limit ${agent.limitWindow}` : 'limit')].filter(Boolean);
+        return parts.join(t.paint('separator', o.separator));
+      }).filter(Boolean);
+      const quotas = agents.find((a) => a.input.quota_windows?.length)?.input.quota_windows || [];
+      const limits = quotas.map((w) => limitText(t, w.label, w.used_percentage, w.resets_at, w.window_seconds, d.now, optsFor(byId['limit-5h'], {}))).filter(Boolean);
+      const parts = [rendered.join(t.paint('muted', ' · ')), ...limits].filter(Boolean);
       return parts.length ? t.paint('muted', id) + ' ' + parts.join(t.paint('separator', o.separator)) : null;
     } });
 }

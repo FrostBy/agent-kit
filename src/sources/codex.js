@@ -4,6 +4,7 @@ const path = require('path');
 const { StringDecoder } = require('string_decoder');
 const { CODEX_DIR } = require('../util');
 const cache = require('../cache');
+const broker = require('./broker');
 
 const clean = (s) => String(s ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '');
 const samePath = (a, b) => {
@@ -44,7 +45,7 @@ function readMetaUncached(file) {
   finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
-function findSession({ home = CODEX_DIR, root = process.cwd(), session, threadId = process.env.CODEX_THREAD_ID } = {}) {
+function findSession({ home = CODEX_DIR, root = process.cwd(), session, threadId = process.env.CODEX_THREAD_ID, execOnly = false } = {}) {
   if (session && fs.existsSync(session)) {
     if (!fs.statSync(session).isFile() || !readMeta(session)) throw new Error('not a Codex session JSONL file');
     return path.resolve(session);
@@ -62,6 +63,7 @@ function findSession({ home = CODEX_DIR, root = process.cwd(), session, threadId
   return files.find((p) => {
     const m = readMeta(p);
     if (typeof m?.cwd !== 'string' || !samePath(root, m.cwd)) return false;
+    if (execOnly && m.source !== 'exec') return false;
     return !(m.parent_thread_id || (typeof m.source === 'object' && m.source && 'subagent' in m.source));
   }) || null;
 }
@@ -193,12 +195,26 @@ function modelDisplayName(slug, home) {
   return clean(name) || slug;
 }
 
-function load(root, now = Date.now(), home = CODEX_DIR, accepts = () => true) {
+function load(root, now = Date.now(), home = CODEX_DIR, accepts = () => true, scratchpad) {
+  const selected = broker.agents(scratchpad, 'codex', accepts);
+  if (selected.length) {
+    const files = [...sessionFiles(path.join(home, 'sessions'))];
+    const agents = selected.map((agent) => {
+      const file = files.find((p) => path.basename(p).endsWith(`-${agent.id}.jsonl`));
+      return file ? loadFile(root, now, home, file, agent.updatedAt, agent) : null;
+    }).filter(Boolean);
+    if (agents.length) return { agents };
+  }
   try {
-    const file = findSession({ home, root, threadId: '' });
+    const file = findSession({ home, root, threadId: '', execOnly: true });
     if (!file) return null;
     const updatedAt = fs.statSync(file).mtimeMs;
-    if (!accepts(updatedAt)) return null;
+    return accepts(updatedAt) ? loadFile(root, now, home, file, updatedAt) : null;
+  } catch { return null; }
+}
+
+function loadFile(root, now, home, file, updatedAt, agent) {
+  try {
     const data = cache.incremental(file, () => ({ ...state(), limits: [], pending: [], agents: [] }), (text, data) => {
       for (const key of ['limits', 'pending', 'agents']) data[key] = new Map(data[key]);
       apply(text, data);
@@ -207,7 +223,7 @@ function load(root, now = Date.now(), home = CODEX_DIR, accepts = () => true) {
     });
     for (const key of ['limits', 'pending', 'agents']) data[key] = new Map(data[key]);
     const out = snapshot(data, root, now);
-    out.input.model.display_name = clean(modelDisplayName(out.input.model.display_name, home));
-    return { input: out.input, updatedAt };
+    out.input.model.display_name = clean(modelDisplayName(out.input.model.display_name || agent?.model, home));
+    return { input: out.input, updatedAt, name: agent ? clean(agent.name) : undefined };
   } catch { return null; }
 }

@@ -131,6 +131,7 @@ Other commands: `--preview` renders sample data in the current folder, `--list [
 ## Widgets
 
 In Claude mode, add `codex` and `kimi` to `lines` manually. `exclude` lists paths separated by `;`, hiding the widget in those folders and descendants (case-insensitive on Windows). `maxAge` is the session age in minutes. Kimi logs above 16 MiB are hidden. Reads are local, without credentials.
+The widgets first use agent-broker state files in `input.scratchpad_dir`, matching Codex by `threadId` and Kimi by `sessionId`: up to three running agents (including starting agents with an ID), otherwise the latest idle agent. Freshness uses the state file's mtime; done/error agents are ignored. Agent names appear in gray, with Codex account quotas once at the end. Without a matching broker agent, selection falls back to cwd: only `codex exec` sessions for Codex, and local Kimi sessions for `kimi -p`.
 Kimi shows `limit 5h` for 5 hours after a 5-hour quota error; `limit month` (monthly) and `limit` (unknown window) remain for 30 days after the event.
 
 <!-- widgets:start -->
