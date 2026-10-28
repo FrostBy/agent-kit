@@ -36,6 +36,8 @@ Fable 5.1 high   ctx ▰▰▱▱▱ 42% 84k/200k   ⚙  Edit render.js   📋 3
 
 This experiment runs from source: first build Codex following [patches/README.md](patches/README.md), then run the launcher from this checkout:
 
+The native build is stamped with the upstream 0.164.0 commit, so Codex's bundled voice input keeps working.
+
 ```sh
 node scripts/native-codex.js
 ```

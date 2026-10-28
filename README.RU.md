@@ -36,6 +36,8 @@ Fable 5.1 high   ctx ▰▰▱▱▱ 42% 84k/200k   ⚙  Edit render.js   📋 3
 
 Эксперимент запускается из исходников: сначала соберите Codex по [patches/README.md](patches/README.md), затем запустите launcher из этой папки:
 
+Нативная сборка помечается коммитом исходного Codex 0.164.0, поэтому штатный голосовой ввод Codex продолжает работать.
+
 ```sh
 node scripts/native-codex.js
 ```

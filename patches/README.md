@@ -22,9 +22,13 @@ $env:CARGO_TARGET_DIR = "$PWD/.native/target"
 $env:CARGO_HOME = "$PWD/.native/cargo"
 $env:CARGO_PROFILE_DEV_DEBUG = '0'
 $env:CARGO_PROFILE_DEV_INCREMENTAL = 'false'
+$env:STABLE_GIT_COMMIT = '6aaac694803004a63c6f393d153c96d22521a6b9'
+$env:CODEX_BUILD_COMMIT = '6aaac694803004a63c6f393d153c96d22521a6b9'
 Push-Location .native/codex/codex-rs
 try { cargo build -p codex-cli --bin codex } finally { Pop-Location }
 ```
+
+This is the commit of the codex-0.164.0 source archive, visible in the ZIP comment; without it, the build gets the `dev` identifier and the bundled voice component (`codex-resources/voice/bin/codex-voice-host.exe`) rejects the handshake, so voice does not work in Codex. Check that `codex-voice-host.exe --build-commit` matches this value.
 
 The release archive contains workspace package versions stamped as `0.0.0` in Cargo.lock; Cargo updates those to `0.164.0`. External dependency versions do not change.
 The prepared local toolchain lives in `.native/toolchain/bin`; it was extracted without installing Rust globally.
