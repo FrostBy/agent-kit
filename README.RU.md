@@ -8,7 +8,11 @@
   <img src="https://img.shields.io/badge/i18n-en%20%7C%20ru-informational" alt="Английский и русский">
 </p>
 
-**Набор для статуслайна [Claude Code](https://code.claude.com), нативных фич Codex и ускоренного голоса.** Контекст, лимиты, git по репозиториям папки-зонтика и текущая активность. Node-рендерер без зависимостей, с TUI-редактором, на английском и русском.
+**Статуслайн для [Claude Code](https://code.claude.com) и патчи для [Codex CLI](https://github.com/openai/codex).**
+
+- **Статуслайн Claude Code**: контекст, лимиты, git по репозиториям папки-зонтика, текущая активность, виджеты исполнителей Codex/Kimi. Node без зависимостей, TUI-редактор, английский и русский.
+- **Патчи Codex**: нативный футер на том же рендерере, полные диффы, время команд, повторы при перегрузке, Shift+Tab Plan/Auto, ограниченные сабагенты. Codex собирается у вас из пропатченных исходников, бинарники не распространяются.
+- **Ускоренный голос Codex**: промпт realtime для более быстрой речи (только конфиг).
 
 English version: [README.md](README.md)
 
@@ -21,22 +25,26 @@ Fable 5.1 high   ctx ▰▰▱▱▱ 42% 84k/200k   ⚙  Edit render.js   📋 3
   Σ +128 −16
 ```
 
-## Требования (Prerequisites)
+## Требования
 
-- Node.js 20+. Зависимостей npm нет.
-- Для нативного Codex: Windows x64, Git, rustup (`winget install Rustlang.Rustup`) и MSVC C++ Build Tools с Windows SDK. Нужный Rust выбирается и скачивается по штатному `rust-toolchain.toml`.
-- MSVC устанавливается вручную: `winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`.
-- Нужен установленный официальный standalone-пакет Codex 0.164.0 с его ресурсами. Ориентир для первой release-сборки: 30–60 ГБ свободного места и 30–120 минут в зависимости от компьютера и сети; повторные сборки используют кэш Cargo. Бинарники собираются локально и здесь не распространяются.
+- **Статуслайн Claude Code**: Node.js 20+. Больше ничего.
+- **Патчи Codex** (пока Windows x64, macOS/Linux в планах):
+  - Git;
+  - [rustup](https://rustup.rs) (`winget install Rustlang.Rustup`); версию Rust задаёт `rust-toolchain.toml` Codex;
+  - MSVC C++ Build Tools: `winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`;
+  - установленный официальный Codex 0.164.0 (его пакет берётся за основу);
+  - десятки ГБ на диске и от 20 минут на первую release-сборку.
 
-## Быстрый старт (Quick start)
+Установщик только проверяет требования и печатает команды, сам ничего не ставит.
 
-Клонируйте репозиторий и запустите:
+## Быстрый старт
 
 ```sh
-node install.js
+git clone https://github.com/FrostBy/agent-kit && cd agent-kit
+node install.js          # или install.cmd / sh install.sh
 ```
 
-Стрелки, пробел и Enter выбирают статуслайн Claude, отдельные фичи Codex и ускорение голоса. Зависимости добавляются автоматически и помечаются `(required)`. Изначально выбран только Claude. `install.cmd` и `sh install.sh` — тонкие обёртки запуска Node.
+Стрелки, пробел и Enter: статуслайн Claude, каждый патч Codex отдельно, ускоренный голос. Зависимости подтягиваются сами. Без интерактива:
 
 ```sh
 node install.js --list
@@ -45,18 +53,9 @@ node install.js --only statusline,full-diff,interaction-modes,voice
 node install.js --yes --skip voice
 ```
 
-Без TTY нужны `--yes`, `--only id,...` или `--skip id,...`. `--yes` выбирает все доступные пункты; `--skip` исключает пункты, а явное исключение необходимой зависимости вызывает ошибку. На macOS/Linux пункты Codex недоступны с пометкой TODO; Claude работает. До действий установщик проверяет требования сборки и выводит сводку. Сторонние инструменты автоматически не устанавливаются.
+Перед изменениями делается бэкап настроек и `config.toml`; `CLAUDE_CONFIG_DIR` и `CODEX_HOME` учитываются. [Шаблон голоса](templates/codex-voice-prompt.md) основан на realtime-промпте Codex ([Apache-2.0](patches/LICENSE.Apache-2.0)).
 
-Claude использует прежнюю логику `--install` и учитывает `CLAUDE_CONFIG_DIR`. Голос учитывает `CODEX_HOME`, перед правкой создаётся бэкап `config.toml`. Замена существующего голосового промпта требует подтверждения; при `--yes` пункт пропускается с сообщением. [Шаблон голоса](templates/codex-voice-prompt.md) основан на `codex-rs/prompts/templates/realtime/backend_prompt.md` из OpenAI Codex 0.164.0 ([Apache-2.0](patches/LICENSE.Apache-2.0)): имя заменено нейтральной инструкцией и добавлено ускорение речи. Идея ускорения — [booxter/nix](https://github.com/booxter/nix). При обновлении Codex обновляйте шаблон.
-
-## Что показывает
-
-- **Контекст**: сколько токенов занято из окна (`84k/200k`, `170k/1M`), полоска окрашивается по порогам.
-- **Лимиты**: окна на 5 часов и неделю со временем до сброса и недельные лимиты по моделям, например Fable. Если тратите быстрее, чем идёт окно, цифры краснеют, а `out in 1d9h` показывает, когда при таком темпе лимит кончится.
-- **Git в папках-зонтиках**: если сессия запущена в папке с несколькими репо, каждое репо с незакоммиченными или незапушенными изменениями выводится отдельной строкой, колонки выровнены, репо, в котором сейчас Claude, помечено `▸`, строки суммируются (`Σ`). Внутри одного репо показывается это репо.
-- **Активность**: текущий инструмент и его аргумент, прогресс todo, работающие сабагенты, PR ветки и статус ревью.
-- **Деньги, только когда это деньги**: стоимость сессии и расход за сегодня по всем сессиям видны при оплате через API или на подписке, когда в текущей сессии пошёл расход extra usage. Пока вы в рамках подписки, они скрыты.
-- **Строки сабагентов**: по строке на сабагента в панели агентов: модель, effort, токены, доля контекста и мини-график.
+Полный дифф, повторы при перегрузке и ускорение голоса основаны на патчах [booxter](https://github.com/booxter), см. [Благодарности](#благодарности).
 
 ## Codex
 
@@ -292,6 +291,12 @@ Kimi показывает `limit 5h` в течение 5 часов после �
 npm test
 node statusline.js --preview
 ```
+
+## Благодарности
+
+- [booxter](https://github.com/booxter): исходные патчи Codex для полных диффов в компактном режиме, повторов при перегрузке и лимита stream retry, идея ускорения голоса ([booxter/nix](https://github.com/booxter/nix)). Здесь перенесены на Codex 0.164.0.
+- [GordonBeeming/codex-statusline](https://github.com/GordonBeeming/codex-statusline) (Apache-2.0): основа патча нативного футера.
+- [OpenAI Codex](https://github.com/openai/codex) (Apache-2.0): пропатченные исходники и шаблон голосового промпта. См. [patches/NOTICE](patches/NOTICE).
 
 ## Лицензия
 

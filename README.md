@@ -8,7 +8,11 @@
   <img src="https://img.shields.io/badge/i18n-en%20%7C%20ru-informational" alt="English and Russian">
 </p>
 
-**A kit for [Claude Code](https://code.claude.com) statuslines, custom Codex native features and faster voice.** Context, quotas, git across umbrella repositories and runtime activity. A dependency-free Node renderer, a TUI editor, English and Russian.
+**A statusline for [Claude Code](https://code.claude.com) and patches for [Codex CLI](https://github.com/openai/codex).**
+
+- **Claude Code statusline**: context, quotas, git across umbrella repositories, runtime activity, Codex/Kimi executor widgets. Dependency-free Node, TUI editor, English and Russian.
+- **Codex patches**: a native footer driven by the same renderer, full diffs, command timing, capacity retries, Shift+Tab Plan/Auto, restricted subagents. You build Codex yourself from the patched sources; no binaries are shipped.
+- **Faster Codex voice**: a realtime prompt for quicker speech (configuration only).
 
 Русская версия: [README.RU.md](README.RU.md)
 
@@ -23,20 +27,24 @@ Fable 5.1 high   ctx ▰▰▱▱▱ 42% 84k/200k   ⚙  Edit render.js   📋 3
 
 ## Prerequisites
 
-- Node.js 20+. No npm dependencies.
-- Codex native: Windows x64, Git, rustup (`winget install Rustlang.Rustup`), and MSVC C++ Build Tools with Windows SDK. Rust is selected and downloaded by the upstream `rust-toolchain.toml`.
-- Install MSVC manually: `winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`.
-- Keep an official Codex 0.164.0 standalone package installed for its bundled resources. Allow roughly 30–60 GB free and 30–120 minutes for the first release build, depending on hardware/network; later builds reuse the Cargo cache. Binaries are built locally, never distributed here.
+- **Claude Code statusline**: Node.js 20+. Nothing else.
+- **Codex patches** (Windows x64 for now, macOS/Linux TODO):
+  - Git;
+  - [rustup](https://rustup.rs) (`winget install Rustlang.Rustup`); the Rust version comes from Codex's `rust-toolchain.toml`;
+  - MSVC C++ Build Tools: `winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`;
+  - the official Codex 0.164.0 installed (its package is copied as the base);
+  - tens of GB of disk and 20+ minutes for the first release build.
+
+The installer only checks these and prints the commands; it never installs tools for you.
 
 ## Quick start
 
-Clone this repository, then run:
-
 ```sh
-node install.js
+git clone https://github.com/FrostBy/agent-kit && cd agent-kit
+node install.js          # or install.cmd / sh install.sh
 ```
 
-Use arrows, Space and Enter to choose Claude statusline, individual Codex features and faster voice. Required dependencies are checked automatically and marked `(required)`. Only Claude is checked initially. `install.cmd` or `sh install.sh` are thin Node launchers.
+Pick items with arrows, Space and Enter: Claude statusline, each Codex patch separately, faster voice. Dependencies are added automatically. Non-interactive:
 
 ```sh
 node install.js --list
@@ -45,18 +53,9 @@ node install.js --only statusline,full-diff,interaction-modes,voice
 node install.js --yes --skip voice
 ```
 
-Without a TTY, pass `--yes`, `--only id,...` or `--skip id,...`. `--yes` selects all available items; `--skip` excludes items, and an explicitly skipped required dependency is an error. On macOS/Linux, Codex items are marked TODO and unavailable; Claude works. The installer prints a summary and checks build requirements before taking action. It never installs third-party tools automatically.
+Settings and `config.toml` are backed up before changes; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are respected. The [voice template](templates/codex-voice-prompt.md) is based on Codex's realtime backend prompt ([Apache-2.0](patches/LICENSE.Apache-2.0)).
 
-Claude uses the existing `--install` logic and respects `CLAUDE_CONFIG_DIR`. Voice respects `CODEX_HOME` and backs up `config.toml` before editing. An existing voice prompt requires confirmation; `--yes` skips it with a message. The bundled [voice template](templates/codex-voice-prompt.md) derives from OpenAI Codex 0.164.0's `codex-rs/prompts/templates/realtime/backend_prompt.md` ([Apache-2.0](patches/LICENSE.Apache-2.0)), with a neutral name instruction and faster speech. Faster-voice idea: [booxter/nix](https://github.com/booxter/nix). Refresh the template when upgrading Codex.
-
-## What it shows
-
-- **Context**: used tokens out of the window (`84k/200k`, `170k/1M`), with a bar coloured by threshold.
-- **Limits**: the 5-hour and weekly windows with time to reset, plus per-model weekly limits such as Fable. When you burn faster than the window runs, the numbers turn red and `out in 1d9h` says when the limit runs out at this pace.
-- **Git in umbrella folders**: launched in a folder that holds several repos, it lists every repo with uncommitted or unpushed work on its own line, aligned in columns, marks the one Claude is in with `▸` and adds up the lines (`Σ`). Inside a single repo it shows that repo.
-- **Activity**: the running tool and its argument, todo progress, running subagents, the PR of the branch with its review state.
-- **Money only when it is money**: session cost and today's spend across all sessions appear on API billing, or on a subscription once extra usage starts being spent in the current session. Within the subscription limits they stay hidden.
-- **Subagent rows**: a line per subagent in the agents panel with model, effort, tokens, share of context and a sparkline.
+Full diff, capacity retries and faster voice are based on [booxter](https://github.com/booxter)'s patches, see [Credits](#credits).
 
 ## Codex
 
@@ -292,6 +291,12 @@ Per-model limits, extra usage and money on a subscription need the account usage
 npm test
 node statusline.js --preview
 ```
+
+## Credits
+
+- [booxter](https://github.com/booxter): the original Codex patches for full diffs in compact mode, capacity retries and the stream retry limit, and the faster-voice idea ([booxter/nix](https://github.com/booxter/nix)). Ported here to Codex 0.164.0.
+- [GordonBeeming/codex-statusline](https://github.com/GordonBeeming/codex-statusline) (Apache-2.0): the base of the native footer patch.
+- [OpenAI Codex](https://github.com/openai/codex) (Apache-2.0): patched sources and the voice prompt template. See [patches/NOTICE](patches/NOTICE).
 
 ## Licence
 
