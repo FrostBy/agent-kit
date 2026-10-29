@@ -15,6 +15,8 @@ const value = (name) => args.find((a) => a.startsWith(`${name}=`))?.slice(name.l
 
 const HELP = `${pkg.name} ${pkg.version}
 
+  node install.js    choose Claude statusline, Codex features and faster voice
+
   (stdin)            render the status line from Claude Code JSON
   --preview          render with sample data in the current directory
   --codex-native     render a native footer from patched Codex JSON on stdin

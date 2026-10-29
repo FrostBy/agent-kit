@@ -1,0 +1,13 @@
+{
+  "version": "0.164.0",
+  "commit": "6aaac694803004a63c6f393d153c96d22521a6b9",
+  "archiveSha256": "9c26a6a226a7b96bc9086225e5efc8b6db1192bc9929224cb93eb5a868508155",
+  "features": [
+    { "id": "statusline", "file": "statusline.patch", "description": { "en": "Native command footer, payload, 32-line ceiling and hidden stock Plan indicator", "ru": "Нативный футер, payload, потолок 32 строки и скрытие штатного Plan-индикатора" }, "dependencies": [], "attribution": "GordonBeeming/codex-statusline v5 (Apache-2.0); agent-statusline port and extensions" },
+    { "id": "full-diff", "file": "full-diff.patch", "description": { "en": "Full edit diffs in compact mode", "ru": "Полные диффы правок в компактном режиме" }, "dependencies": [], "attribution": "booxter/nix: codex-show-full-patches.patch" },
+    { "id": "exec-timing", "file": "exec-timing.patch", "description": { "en": "Command elapsed time and live-output line counts", "ru": "Время команды и количество строк живого вывода" }, "dependencies": [], "attribution": "agent-statusline contributors" },
+    { "id": "capacity-retry", "file": "capacity-retry.patch", "description": { "en": "Capacity retries with 5–60s backoff; stream retry limit 10", "ru": "Повторы при перегрузке с задержкой 5–60 с; лимит stream retry 10" }, "dependencies": [], "attribution": "booxter/nix: codex-capacity-retry.patch, codex-stream-retry-limit.patch" },
+    { "id": "interaction-modes", "file": "interaction-modes.patch", "description": { "en": "Shift+Tab Plan/Auto without a modal, Windows Tab+Shift, payload mode and combined permission update", "ru": "Shift+Tab Plan/Auto без модалки, Windows Tab+Shift, mode в payload и единое обновление прав" }, "dependencies": ["statusline"], "attribution": "agent-statusline contributors" },
+    { "id": "restricted-subagents", "file": "restricted-subagents.patch", "description": { "en": "Restricted subagent spawn mode: plan or read_only", "ru": "Ограниченный режим сабагента: plan или read_only" }, "dependencies": [], "attribution": "agent-statusline contributors" }
+  ]
+}

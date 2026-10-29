@@ -1,14 +1,14 @@
-<h1 align="center">agent-statusline</h1>
+<h1 align="center">agent-kit</h1>
 
 <p align="center">
-  <a href="https://github.com/FrostBy/agent-statusline/actions/workflows/ci.yml"><img src="https://github.com/FrostBy/agent-statusline/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/FrostBy/agent-kit/actions/workflows/ci.yml"><img src="https://github.com/FrostBy/agent-kit/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-MIT-blue" alt="Лицензия: MIT"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node >= 20">
   <img src="https://img.shields.io/badge/dependencies-0-success" alt="Без зависимостей">
   <img src="https://img.shields.io/badge/i18n-en%20%7C%20ru-informational" alt="Английский и русский">
 </p>
 
-**Настраиваемый статуслайн для [Claude Code](https://code.claude.com) и экспериментальный нативный футер для патченного Codex CLI.** Контекст, лимиты, git по репозиториям папки-зонтика и текущая активность. Node-рендерер без зависимостей, с TUI-редактором, на английском и русском.
+**Набор для статуслайна [Claude Code](https://code.claude.com), нативных фич Codex и ускоренного голоса.** Контекст, лимиты, git по репозиториям папки-зонтика и текущая активность. Node-рендерер без зависимостей, с TUI-редактором, на английском и русском.
 
 English version: [README.md](README.md)
 
@@ -20,6 +20,34 @@ Fable 5.1 high   ctx ▰▰▱▱▱ 42% 84k/200k   ⚙  Edit render.js   📋 3
   web  ⎇ main       2 to pull +8 −2
   Σ +128 −16
 ```
+
+## Требования (Prerequisites)
+
+- Node.js 20+. Зависимостей npm нет.
+- Для нативного Codex: Windows x64, Git, rustup (`winget install Rustlang.Rustup`) и MSVC C++ Build Tools с Windows SDK. Нужный Rust выбирается и скачивается по штатному `rust-toolchain.toml`.
+- MSVC устанавливается вручную: `winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`.
+- Нужен установленный официальный standalone-пакет Codex 0.164.0 с его ресурсами. Ориентир для первой release-сборки: 30–60 ГБ свободного места и 30–120 минут в зависимости от компьютера и сети; повторные сборки используют кэш Cargo. Бинарники собираются локально и здесь не распространяются.
+
+## Быстрый старт (Quick start)
+
+Клонируйте репозиторий и запустите:
+
+```sh
+node install.js
+```
+
+Стрелки, пробел и Enter выбирают статуслайн Claude, отдельные фичи Codex и ускорение голоса. Зависимости добавляются автоматически и помечаются `(required)`. Изначально выбран только Claude. `install.cmd` и `sh install.sh` — тонкие обёртки запуска Node.
+
+```sh
+node install.js --list
+node install.js --only claude
+node install.js --only statusline,full-diff,interaction-modes,voice
+node install.js --yes --skip voice
+```
+
+Без TTY нужны `--yes`, `--only id,...` или `--skip id,...`. `--yes` выбирает все доступные пункты; `--skip` исключает пункты, а явное исключение необходимой зависимости вызывает ошибку. На macOS/Linux пункты Codex недоступны с пометкой TODO; Claude работает. До действий установщик проверяет требования сборки и выводит сводку. Сторонние инструменты автоматически не устанавливаются.
+
+Claude использует прежнюю логику `--install` и учитывает `CLAUDE_CONFIG_DIR`. Голос учитывает `CODEX_HOME`, перед правкой создаётся бэкап `config.toml`. Замена существующего голосового промпта требует подтверждения; при `--yes` пункт пропускается с сообщением. [Шаблон голоса](templates/codex-voice-prompt.md) основан на `codex-rs/prompts/templates/realtime/backend_prompt.md` из OpenAI Codex 0.164.0 ([Apache-2.0](patches/LICENSE.Apache-2.0)): имя заменено нейтральной инструкцией и добавлено ускорение речи. Идея ускорения — [booxter/nix](https://github.com/booxter/nix). При обновлении Codex обновляйте шаблон.
 
 ## Что показывает
 
@@ -34,13 +62,24 @@ Fable 5.1 high   ctx ▰▰▱▱▱ 42% 84k/200k   ⚙  Edit render.js   📋 3
 
 ### Нативный футер в кастомном CLI
 
-Эксперимент запускается из исходников: сначала соберите Codex по [patches/README.md](patches/README.md), затем запустите launcher из этой папки:
+Сборка из исходников для Windows x64: нужны Node.js 20+, Git, rustup и MSVC C++ Build Tools с Windows SDK. Codex закрепляет Rust 1.99.1. Бинарники не распространяются. Для сборки и установки на macOS/Linux пока явные TODO с понятной ошибкой.
+
+```sh
+npm run codex:prepare
+npm run codex:build -- --features statusline,full-diff,exec-timing,capacity-retry,interaction-modes,restricted-subagents
+npm run codex:install
+npm run codex:sync-footer
+npm run codex:restore
+```
+
+Без `--features` выбираются все фичи; зависимости добавляются автоматически. `--dev` выбирает debug вместо release. Установка копирует существующий официальный standalone-пакет в `<version>-agent-kit`, сохраняет состояние отката и учитывает `CODEX_HOME` / `--standalone`; конфиг и авторизация не меняются. Повторная установка обновляет тот же кастомный релиз на месте, переименовывая занятый exe. Для старой ручной установки находится штатный релиз, а прежний кастомный каталог сохраняется для ручного удаления. [Требования, пути и ограничения](patches/README.md#prerequisites--требования), [manifest фич](patches/codex-0.164.0/manifest.json). После правок JS команда `codex:sync-footer` обновляет упакованный рендерер.
 
 Нативная сборка помечается коммитом исходного Codex 0.164.0, поэтому штатный голосовой ввод Codex продолжает работать.
 
 Патч также добавляет полный дифф в компактном режиме, время команд и счётчик живого вывода, повторы при перегрузке, переключение Plan/Auto и ограниченные режимы сабагентов. Полный список и авторство — в [описании изменений патча](patches/README.md#what-the-patch-adds).
 
 ```sh
+npm run codex:build -- --dev
 node scripts/native-codex.js
 ```
 
@@ -88,8 +127,8 @@ gpt-6.1-sol high   ctx ▰▰▱▱▱ 42% 200k/475k   ⚙  exec npm test   📋
 Глобально с GitHub, затем подключить к Claude Code:
 
 ```sh
-npm install -g github:FrostBy/agent-statusline
-agent-statusline --install
+npm install -g github:FrostBy/agent-kit
+agent-kit --install
 ```
 
 `--install` прописывает `statusLine` и `subagentStatusLine` в `~/.claude/settings.json` как `node "<путь установки>/statusline.js"`: каждая отрисовка запускает установленную копию и ничего не скачивает. Прежние значения сохраняются, `--uninstall` их возвращает. Если settings.json не разбирается, он не трогается.
@@ -99,12 +138,12 @@ agent-statusline --install
 ## Настройка
 
 ```sh
-agent-statusline --configure
+agent-kit --configure
 ```
 
 Редактор показывает живое превью на тестовых данных. Клавиши: `↑↓` выбор, `a` добавить блок, `d` удалить, `K`/`J` двигать, `|` разделитель, `Enter` опции блока, `n` новая строка, `g` общие настройки, `s` сохранить, `q` выход. В mintty и Git Bash запускайте через `winpty`.
 
-Конфиг Claude лежит в `~/.claude/statusline.json` (путь меняется через `AGENT_STATUSLINE_CONFIG` или `CLAUDE_STATUSLINE_CONFIG`). Всё, чего нет в файле, берётся из умолчаний, `--init` записывает их в файл. Старая команда `claude-statusline-ultimate` сохранена как алиас. Имя пакета и команда — `agent-statusline`.
+Конфиг Claude лежит в `~/.claude/statusline.json` (путь меняется через `AGENT_STATUSLINE_CONFIG` или `CLAUDE_STATUSLINE_CONFIG`). Всё, чего нет в файле, берётся из умолчаний, `--init` записывает их в файл. Имя пакета и команда — `agent-kit`; `agent-statusline` и `claude-statusline-ultimate` сохранены как алиасы. Внутренний каталог Codex `codex-resources/agent-statusline` и имя файла `agent-statusline-state.json` не меняются ради совместимости.
 
 ```json
 {

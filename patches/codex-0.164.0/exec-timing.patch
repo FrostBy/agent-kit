@@ -1,0 +1,163 @@
+diff --git a/codex-rs/tui/src/exec_cell/live_output.rs b/codex-rs/tui/src/exec_cell/live_output.rs
+--- a/codex-rs/tui/src/exec_cell/live_output.rs
++++ b/codex-rs/tui/src/exec_cell/live_output.rs
+@@ -94,6 +94,10 @@
+                 self.tail.push_back(line);
+             }
+         }
++    }
++
++    pub(super) fn completed_lines(&self) -> usize {
++        self.completed_lines
+     }
+ 
+     pub(super) fn total_lines(&self) -> usize {
+diff --git a/codex-rs/tui/src/exec_cell/model.rs b/codex-rs/tui/src/exec_cell/model.rs
+--- a/codex-rs/tui/src/exec_cell/model.rs
++++ b/codex-rs/tui/src/exec_cell/model.rs
+@@ -44,6 +44,12 @@
+                 (total, total)
+             }
+         }
++    }
++
++    pub(super) fn completed_live_lines(&self) -> usize {
++        self.live_output
++            .as_ref()
++            .map_or(0, LiveCommandOutput::completed_lines)
+     }
+ 
+     /// Returns retained preview lines with reverse traversal for efficient tail rendering.
+diff --git a/codex-rs/tui/src/exec_cell/render.rs b/codex-rs/tui/src/exec_cell/render.rs
+--- a/codex-rs/tui/src/exec_cell/render.rs
++++ b/codex-rs/tui/src/exec_cell/render.rs
+@@ -15,6 +15,7 @@
+ use crate::motion::activity_indicator;
+ use crate::render::highlight::highlight_bash_to_lines;
+ use crate::render::line_utils::line_to_static;
++use crate::status_indicator_widget::fmt_elapsed_compact;
+ use crate::style::accent_color;
+ use crate::terminal_hyperlinks::HyperlinkLine;
+ use crate::terminal_hyperlinks::LogicalLineSource;
+@@ -493,7 +494,27 @@
+         } else {
+             strip_bash_lc_and_escape(&call.command)
+         };
+-        let highlighted_lines = highlight_bash_to_lines(&cmd_display);
++        let mut highlighted_lines = highlight_bash_to_lines(&cmd_display);
++        if !is_interaction && let Some(first) = highlighted_lines.first_mut() {
++            let elapsed = call
++                .duration
++                .or_else(|| call.start_time.map(|t| t.elapsed()));
++            if let Some(elapsed) = elapsed.filter(|elapsed| elapsed.as_secs() > 0) {
++                first
++                    .spans
++                    .push(format!(" · {}", fmt_elapsed_compact(elapsed.as_secs())).dim());
++            }
++            if call.duration.is_none() {
++                let count = call
++                    .output
++                    .as_ref()
++                    .map_or(0, CommandOutput::completed_live_lines);
++                if count > 0 {
++                    let noun = if count == 1 { "line" } else { "lines" };
++                    first.spans.push(format!(" · {count} {noun}").dim());
++                }
++            }
++        }
+ 
+         let continuation_wrap_width = layout.command_continuation.wrap_width(width);
+         let continuation_opts =
+@@ -857,6 +878,78 @@
+     }
+ 
+     #[test]
++    fn command_header_elapsed_and_live_lines_snapshot() {
++        let mut cell = new_active_exec_command(
++            "call-id".into(),
++            vec!["echo".into(), "output".into()],
++            Vec::new(),
++            ExecCommandSource::Agent,
++            None,
++            false,
++        );
++        cell.group.calls[0].start_time = None;
++        let render = |cell: &ExecCell, width| render_line_text(&cell.display_lines(width)[0]);
++        let fast = render(&cell, 80);
++        assert!(cell.append_output("call-id", "first\nsecond\npartial"));
++        cell.group.calls[0].start_time = Some(Instant::now() - std::time::Duration::from_secs(10));
++        let running = render(&cell, 80);
++        let header = &cell.display_lines(80)[0];
++        assert!(
++            header
++                .spans
++                .iter()
++                .filter(|span| span.content.contains('·'))
++                .all(|span| span.style.add_modifier.contains(Modifier::DIM))
++        );
++        assert!(cell.display_lines(24).iter().all(|line| line.width() <= 24));
++        assert!(cell.complete_call(
++            "call-id",
++            CommandOutput::new(0, "first\nsecond\npartial".into()),
++            std::time::Duration::from_secs(11),
++        ));
++        let ran = render(&cell, 80);
++        cell.group.calls[0].source = ExecCommandSource::UserShell;
++        let user_shell = render(&cell, 80);
++        cell.group.calls[0].duration = Some(std::time::Duration::from_millis(999));
++        let fast_ran = render(&cell, 80);
++        insta::assert_snapshot!(
++            "command_header_elapsed_and_live_lines",
++            format!(
++                "fast: {fast}\nrunning: {running}\nran: {ran}\nuser shell: {user_shell}\nfast ran: {fast_ran}"
++            )
++        );
++    }
++
++    #[test]
++    fn live_line_header_counts_completed_lines_even_after_truncation() {
++        let mut cell = new_active_exec_command(
++            "call-id".into(),
++            vec!["echo".into(), "output".into()],
++            Vec::new(),
++            ExecCommandSource::Agent,
++            None,
++            false,
++        );
++        cell.group.calls[0].start_time = None;
++        assert!(cell.append_output("call-id", "partial"));
++        assert_eq!(
++            render_line_text(&cell.display_lines(80)[0]),
++            "• Running echo output"
++        );
++        assert!(cell.append_output("call-id", "\n"));
++        assert_eq!(
++            render_line_text(&cell.display_lines(80)[0]),
++            "• Running echo output · 1 line"
++        );
++        assert!(cell.append_output("call-id", &format!("{}partial", "x\n".repeat(600_000))));
++        assert_eq!(
++            render_line_text(&cell.display_lines(80)[0]),
++            "• Running echo output · 600001 lines"
++        );
++        assert!(cell.group.calls[0].output.as_ref().unwrap().line_counts().1 < 600_001);
++    }
++
++    #[test]
+     fn user_shell_output_is_limited_by_screen_lines() {
+         let long_url_like = format!(
+             "https://example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/{}",
+diff --git a/codex-rs/tui/src/exec_cell/snapshots/codex_tui__exec_cell__render__tests__command_header_elapsed_and_live_lines.snap b/codex-rs/tui/src/exec_cell/snapshots/codex_tui__exec_cell__render__tests__command_header_elapsed_and_live_lines.snap
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/tui/src/exec_cell/snapshots/codex_tui__exec_cell__render__tests__command_header_elapsed_and_live_lines.snap
+@@ -0,0 +1,9 @@
++---
++source: tui/src/exec_cell/render.rs
++expression: "format!(\"fast: {fast}\\nrunning: {running}\\nran: {ran}\\nuser shell: {user_shell}\\nfast ran: {fast_ran}\")"
++---
++fast: • Running echo output
++running: • Running echo output · 10s · 2 lines
++ran: • Ran echo output · 11s
++user shell: • You ran echo output · 11s
++fast ran: • You ran echo output

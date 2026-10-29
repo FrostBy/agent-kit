@@ -1,0 +1,406 @@
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -37,6 +37,7 @@
+ use codex_prompts::ResolvedModelMessages;
+ use codex_protocol::error::AgentErrorContext;
+ use codex_protocol::intersect_effective_permission_profiles;
++use codex_protocol::protocol::AskForApproval;
+ use codex_protocol::protocol::EnvironmentConfigState;
+ use codex_thread_store::PersistContext;
+ use codex_utils_path_uri::PathUri;
+@@ -45,6 +46,148 @@
+ use std::time::Instant;
+ 
+ const AGENT_NAMES: &str = include_str!("../../../assets/agent/agent_names.txt");
++
++fn read_only_profile(
++    profile: &codex_protocol::models::PermissionProfile,
++    roots: &[codex_utils_absolute_path::AbsolutePathBuf],
++    cwd: &std::path::Path,
++) -> CodexResult<PermissionProfileSnapshot> {
++    let authority = profile
++        .clone()
++        .materialize_project_roots_with_workspace_roots(roots);
++    let restricted = intersect_effective_permission_profiles(
++        &authority,
++        &codex_protocol::models::PermissionProfile::read_only(),
++        cwd,
++    )
++    .map_err(|err| CodexErr::InvalidRequest(format!("Cannot restrict child permissions: {err}")))?;
++    Ok(PermissionProfileSnapshot::legacy(restricted))
++}
++
++fn restrict_child_to_read_only(options: &mut StartThreadOptions) -> CodexResult<()> {
++    if options
++        .inherited_environments
++        .as_ref()
++        .is_some_and(|snapshot| {
++            snapshot
++                .turn_environments()
++                .any(|environment| environment.environment.is_remote())
++        })
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Read-only child mode requires local executors".into(),
++        ));
++    }
++    if options.environments.is_none() {
++        options.environments = options.inherited_environments.as_ref().map(|snapshot| {
++            snapshot
++                .inheritable_selections()
++                .into_iter()
++                .map(codex_protocol::protocol::TurnEnvironmentSelection::into_request)
++                .collect()
++        });
++    }
++    let profile = read_only_profile(
++        options.config.permissions.permission_profile(),
++        std::slice::from_ref(&options.config.cwd),
++        options.config.cwd.as_path(),
++    )?;
++    options
++        .config
++        .permissions
++        .set_permission_profile_from_session_snapshot(profile)
++        .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
++    options
++        .config
++        .permissions
++        .approval_policy
++        .set(AskForApproval::Never)
++        .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
++    for request in options.environments.iter_mut().flatten() {
++        if matches!(request.config, EnvironmentConfigState::FromThread) {
++            let config = options
++                .inherited_environments
++                .as_ref()
++                .and_then(|snapshot| {
++                    snapshot.turn_environments().find(|environment| {
++                        environment.selection.environment_id == request.environment_id
++                    })
++                })
++                .map(|environment| environment.config().clone())
++                .ok_or_else(|| {
++                    CodexErr::InvalidRequest(
++                        "Read-only child requires a ready inherited environment".into(),
++                    )
++                })?;
++            request.config = EnvironmentConfigState::Ready(config);
++        }
++        let EnvironmentConfigState::Ready(config) = &mut request.config else {
++            return Err(CodexErr::InvalidRequest(
++                "Read-only child requires ready environment bindings".into(),
++            ));
++        };
++        let cwd = request
++            .cwd
++            .to_abs_path()
++            .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
++        let roots = request
++            .workspace_roots
++            .iter()
++            .map(PathUri::to_abs_path)
++            .collect::<std::result::Result<Vec<_>, _>>()
++            .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
++        config.permission_profile =
++            read_only_profile(config.permission_profile.permission_profile(), &roots, &cwd)?;
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod restriction_tests {
++    use super::*;
++    use codex_protocol::models::PermissionProfile;
++    use codex_protocol::permissions::FileSystemAccessMode;
++    use codex_protocol::permissions::FileSystemSandboxEntry;
++    use codex_protocol::permissions::FileSystemSandboxPolicy;
++    use codex_protocol::permissions::NetworkSandboxPolicy;
++    use codex_utils_absolute_path::AbsolutePathBuf;
++
++    #[test]
++    fn read_only_child_preserves_parent_denials() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = AbsolutePathBuf::from_absolute_path(dir.path()).unwrap();
++        let denied = root.join("secret");
++        let mut fs = FileSystemSandboxPolicy::read_only();
++        fs.entries.push(FileSystemSandboxEntry::new(
++            denied.into(),
++            FileSystemAccessMode::Deny,
++        ));
++        let parent =
++            PermissionProfile::from_runtime_permissions(&fs, NetworkSandboxPolicy::Restricted);
++        let child =
++            read_only_profile(&parent, std::slice::from_ref(&root), root.as_path()).unwrap();
++        let child_fs = child.permission_profile().file_system_sandbox_policy();
++        assert!(!child_fs.has_full_disk_write_access());
++        assert!(
++            child_fs
++                .get_writable_roots_with_cwd(root.as_path())
++                .is_empty()
++        );
++        assert!(
++            child_fs
++                .entries
++                .iter()
++                .any(|entry| entry.access == FileSystemAccessMode::Deny)
++        );
++        let again = read_only_profile(
++            child.permission_profile(),
++            std::slice::from_ref(&root),
++            root.as_path(),
++        )
++        .unwrap();
++        assert_eq!(child, again);
++    }
++}
+ 
+ /// Initial input delivered after a spawned agent acquires execution capacity.
+ ///
+@@ -877,6 +1020,9 @@
+             (None, _) => None,
+         };
+         let child_create_started_at = Instant::now();
++        if options.mode == Some(crate::agent::types::RestrictedAgentMode::ReadOnly) {
++            restrict_child_to_read_only(&mut start_options)?;
++        }
+         let new_thread = state
+             .spawn_child_thread(
+                 start_options,
+@@ -890,6 +1036,24 @@
+         agent_metadata.agent_id = Some(new_thread.thread_id);
+         let mut pending_spawn =
+             PendingSpawn::new(Arc::clone(&state), new_thread.thread_id, membership);
++
++        if options.mode == Some(crate::agent::types::RestrictedAgentMode::Plan) {
++            let mut mode = new_thread.thread.config_snapshot().await.collaboration_mode;
++            mode.mode = codex_protocol::config_types::ModeKind::Plan;
++            mode.settings.developer_instructions = None;
++            new_thread
++                .thread
++                .session
++                .update_settings(crate::session::session::SessionSettingsUpdate {
++                    step_settings: crate::session::step_settings::StepSettingsUpdate {
++                        collaboration_mode: Some(mode),
++                        ..Default::default()
++                    },
++                    ..Default::default()
++                })
++                .await
++                .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
++        }
+ 
+         if let Some(SessionSource::SubAgent(
+             subagent_source @ SubAgentSource::ThreadSpawn {
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -268,6 +268,48 @@
+     control: LocalAgentControl,
+ }
+ 
++#[tokio::test]
++async fn spawn_restricted_modes_apply_before_initial_input() {
++    use crate::agent::types::RestrictedAgentMode;
++    for mode in [RestrictedAgentMode::Plan, RestrictedAgentMode::ReadOnly] {
++        let harness = AgentControlHarness::new().await;
++        let (parent_id, _) = harness.start_thread().await;
++        let child_id = harness
++            .spawn_anonymous_child(
++                parent_id,
++                SpawnAgentOptions {
++                    mode: Some(mode),
++                    ..Default::default()
++                },
++            )
++            .await;
++        let child = harness.manager.get_thread(child_id).await.unwrap();
++        let snapshot = child.config_snapshot().await;
++        if mode == RestrictedAgentMode::Plan {
++            assert_eq!(snapshot.collaboration_mode.mode, ModeKind::Plan);
++        } else {
++            assert_eq!(snapshot.approval_policy, AskForApproval::Never);
++            let fs = snapshot.permission_profile.file_system_sandbox_policy();
++            assert!(!fs.has_full_disk_write_access());
++            assert!(
++                fs.get_writable_roots_with_cwd(harness.config.cwd.as_path())
++                    .is_empty()
++            );
++            let environments = child.session.inherited_environment_snapshot().await;
++            for environment in environments.turn_environments() {
++                let fs = environment
++                    .permission_profile()
++                    .file_system_sandbox_policy();
++                assert!(!fs.has_full_disk_write_access());
++                assert!(
++                    fs.get_writable_roots_with_cwd(harness.config.cwd.as_path())
++                        .is_empty()
++                );
++            }
++        }
++    }
++}
++
+ impl AgentControlHarness {
+     async fn new() -> Self {
+         let (home, config) = test_config().await;
+diff --git a/codex-rs/core/src/agent/types.rs b/codex-rs/core/src/agent/types.rs
+--- a/codex-rs/core/src/agent/types.rs
++++ b/codex-rs/core/src/agent/types.rs
+@@ -25,6 +25,7 @@
+ 
+ #[derive(Clone, Debug, Default)]
+ pub struct SpawnAgentOptions {
++    pub mode: Option<RestrictedAgentMode>,
+     pub fork_parent_spawn_call_id: Option<String>,
+     pub fork_mode: Option<SpawnAgentForkMode>,
+     pub parent_thread_id: Option<ThreadId>,
+@@ -39,6 +40,13 @@
+     pub disabled_plugin_ids: Option<Vec<String>>,
+     pub multi_agent_v2_usage_hints: Option<ResolvedMultiAgentV2UsageHints>,
+     pub cyber_access_program: Option<CyberAccessProgram>,
++}
++
++#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub enum RestrictedAgentMode {
++    Plan,
++    ReadOnly,
+ }
+ 
+ /// Identity and status observed from a loaded agent, without a handle to its runtime.
+diff --git a/codex-rs/core/src/thread_spawn.rs b/codex-rs/core/src/thread_spawn.rs
+--- a/codex-rs/core/src/thread_spawn.rs
++++ b/codex-rs/core/src/thread_spawn.rs
+@@ -37,6 +37,7 @@
+     pub agent_type: Option<String>,
+     pub model: Option<String>,
+     pub reasoning_effort: Option<ReasoningEffort>,
++    pub mode: Option<crate::agent::types::RestrictedAgentMode>,
+ }
+ 
+ /// Accepted child and its effective configuration. Acceptance does not mean the turn completed.
+@@ -69,6 +70,7 @@
+         agent_type,
+         model,
+         reasoning_effort,
++        mode,
+     } = request;
+     let message_text = match &message {
+         AgentMessage::Plaintext(text) | AgentMessage::Encrypted(text) => text,
+@@ -96,6 +98,11 @@
+     .await
+     .map_err(ThreadSpawnError::Preparation)?;
+     let config = prepared.config;
++    let mode = mode.or_else(|| {
++        (step_context.settings.effective_collaboration_mode().mode
++            == codex_protocol::config_types::ModeKind::Plan)
++            .then_some(crate::agent::types::RestrictedAgentMode::Plan)
++    });
+     let task_name = turn
+         .session_source
+         .get_agent_path()
+@@ -146,6 +153,7 @@
+             },
+             source: spawn_source,
+             options: SpawnAgentOptions {
++                mode,
+                 fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.to_string()),
+                 fork_mode,
+                 parent_thread_id: Some(session.thread_id),
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
+--- a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
+@@ -125,6 +125,7 @@
+                 /*task_name*/ None,
+             )?,
+             options: SpawnAgentOptions {
++                mode: None,
+                 fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
+                 fork_mode: fork_mode.clone(),
+                 parent_thread_id: Some(session.thread_id),
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+--- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+@@ -123,6 +123,12 @@
+             .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE)
+     };
+     let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
++    properties.insert(
++        "mode".to_string(),
++        JsonSchema::string(Some(
++            "Optional `plan` or `read_only`; can only restrict, never escalate.".to_string(),
++        )),
++    );
+     if !options.expose_agent_type {
+         properties.remove("agent_type");
+     }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
+--- a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
+@@ -40,6 +40,10 @@
+     assert!(!description.contains("max_concurrent_threads_per_session"));
+     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
+     assert!(properties.contains_key("task_name"));
++    assert_eq!(
++        properties["mode"].description.as_deref(),
++        Some("Optional `plan` or `read_only`; can only restrict, never escalate.")
++    );
+     assert!(properties.contains_key("message"));
+     assert_eq!(
+         properties
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
+@@ -132,6 +132,7 @@
+             agent_type: args.agent_type.clone(),
+             model: args.model,
+             reasoning_effort: args.reasoning_effort,
++            mode: args.mode,
+         },
+     )
+     .await
+@@ -208,6 +209,7 @@
+     reasoning_effort: Option<ReasoningEffort>,
+     fork_turns: Option<String>,
+     fork_context: Option<bool>,
++    mode: Option<crate::agent::types::RestrictedAgentMode>,
+ }
+ 
+ impl SpawnAgentArgs {
+@@ -236,6 +238,34 @@
+         Err(FunctionCallError::RespondToModel(
+             "fork_turns must be `none` or `all`".to_string(),
+         ))
++    }
++}
++
++#[cfg(test)]
++mod restriction_tests {
++    use super::*;
++    use crate::agent::types::RestrictedAgentMode;
++
++    #[test]
++    fn spawn_mode_accepts_only_restrictions() {
++        for (mode, expected) in [
++            ("plan", RestrictedAgentMode::Plan),
++            ("read_only", RestrictedAgentMode::ReadOnly),
++        ] {
++            let args: SpawnAgentArgs = serde_json::from_value(serde_json::json!({
++                "message": "review", "task_name": "reviewer", "mode": mode,
++            }))
++            .unwrap();
++            assert_eq!(args.mode, Some(expected));
++        }
++        for mode in ["default", "auto", "full_access", ""] {
++            assert!(
++                serde_json::from_value::<SpawnAgentArgs>(serde_json::json!({
++                    "message": "review", "task_name": "reviewer", "mode": mode,
++                }))
++                .is_err()
++            );
++        }
+     }
+ }
+ 

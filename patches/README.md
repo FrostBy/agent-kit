@@ -1,6 +1,6 @@
 # Native Codex footer experiment
 
-`codex-0.164.0-statusline.patch` targets the official OpenAI Codex tag `rust-v0.164.0`.
+The feature patches in [`codex-0.164.0/manifest.json`](codex-0.164.0/manifest.json) target the official OpenAI Codex tag `rust-v0.164.0`.
 It is based on [GordonBeeming/codex-statusline](https://github.com/GordonBeeming/codex-statusline), patch version 5, ported from Codex 0.163.0.
 The native patch is covered by [Apache-2.0](LICENSE.Apache-2.0); upstream notices are preserved in [NOTICE](NOTICE).
 
@@ -22,24 +22,69 @@ Alongside the native command-backed footer, the Codex 0.164.0 patch includes:
 5. Subagent `multi_agents` v2 spawn accepts `mode: plan|read_only` to restrict the child, never to escalate permissions.
 6. Codex's status-line `max_lines` defaults to 32 as a safety ceiling; the footer's `maxLines` option controls its actual content row budget.
 
-## Build
+## Prerequisites / Требования
 
-Use Rust 1.99.1 and the Visual Studio C++ build tools for x86_64 Windows MSVC. Extract the source into `.native/codex`, then run from this checkout:
+Windows x64, Node.js 20+, Git, [rustup](https://rustup.rs/) and Visual Studio MSVC C++ Build Tools (including the Windows SDK). Codex's `rust-toolchain.toml` selects Rust 1.99.1. If rustup is absent, the build accepts cargo from PATH with a warning; that toolchain must be compatible. MSVC is discovered through cl/link or vswhere. Missing tools produce an actionable error, including the Build Tools winget command.
 
-```powershell
-git -C .native/codex init
-git -c core.longpaths=true -C .native/codex apply ../../patches/codex-0.164.0-statusline.patch
-$env:CARGO_TARGET_DIR = "$PWD/.native/target"
-$env:CARGO_HOME = "$PWD/.native/cargo"
-$env:CARGO_PROFILE_DEV_DEBUG = '0'
-$env:CARGO_PROFILE_DEV_INCREMENTAL = 'false'
-$env:STABLE_GIT_COMMIT = '6aaac694803004a63c6f393d153c96d22521a6b9'
-$env:CODEX_BUILD_COMMIT = '6aaac694803004a63c6f393d153c96d22521a6b9'
-Push-Location .native/codex/codex-rs
-try { cargo build -p codex-cli --bin codex } finally { Pop-Location }
+Windows x64, Node.js 20+, Git, rustup и MSVC C++ Build Tools с Windows SDK. Версию Rust 1.99.1 задаёт исходный Codex. Без rustup допустим совместимый cargo из PATH с предупреждением. macOS/Linux build/install are explicit TODOs and stop with an error; source preparation and patch verification use portable Node code.
+
+Only source patches are distributed; build the binary locally. Installation requires an existing official standalone package with a `current` junction and matching 0.164.0 voice/resources. No npm dependencies are required.
+
+## Build and install / Сборка и установка
+
+```sh
+npm run codex:prepare
+npm run codex:build
+# Or choose features; dependencies are included automatically:
+npm run codex:build -- --features statusline,full-diff,interaction-modes
+npm run codex:install
+npm run codex:sync-footer
+npm run codex:restore
 ```
 
-This is the commit of the codex-0.164.0 source archive, visible in the ZIP comment; without it, the build gets the `dev` identifier and the bundled voice component (`codex-resources/voice/bin/codex-voice-host.exe`) rejects the handshake, so voice does not work in Codex. Check that `codex-voice-host.exe --build-commit` matches this value.
+`prepare` downloads the pinned GitHub tag archive only when missing, verifies SHA-256 and the ZIP comment commit, and extracts clean sources into `.native/work/<version>-<feature-hash>`. It never changes `.native/codex`. `build` prepares again, applies patches in manifest order, and runs cargo with `.native/target` as `CARGO_TARGET_DIR`; release is the default, `--dev` selects debug. `--features none` builds upstream without patches; omitted `--features` selects all. Existing recognized work directories for the same selection are recreated; other directories for this version with our valid source marker are removed best effort after preparation. Foreign directories and other versions are untouched; do not edit generated sources.
+
+Both `STABLE_GIT_COMMIT` and `CODEX_BUILD_COMMIT` are set to `6aaac694803004a63c6f393d153c96d22521a6b9`, the archive commit. Without this stamp, the bundled voice component rejects the `dev` build handshake. The official package's voice host must have the same build commit.
+
+`install` copies the stock package once into the stable sibling release `<version>-agent-kit`, replaces `bin/codex.exe`, and copies `statusline.js`, `package.json`, `LICENSE`, and `src/` into `codex-resources/agent-statusline`. Executable and footer copies are hash-verified. With existing state, reinstall updates the same `customTarget` in place without copying the package again. A locked executable is renamed to `.retired-*` before copying; the footer directory is staged and replaced with rollback on rename failure. Config, auth and terminal settings are untouched. The latest three state backups are retained under standalone. `restore` checks the stock hash and refuses an unexpected active release. `sync-footer` uses the same footer replacement and removes its previous directory after success. Retired executables and staging/previous directories are cleaned up best effort; locked leftovers are silently skipped and retried on later operations.
+
+Without state, a release containing `codex-resources/agent-statusline` or lacking an official version/target-triple name is treated as custom. Migration first searches the targets of `current.before-*` junctions, then `releases/<version>-x86_64-pc-windows-msvc`. A package with our footer is never accepted as stock. If no stock release is found, installation stops with a clear error. The old manual custom release is not deleted: installation prints its path and a reminder to remove it manually only after checking the new installation and closing old processes.
+
+Junction activation uses two renames with rollback on errors (as in the former PowerShell installer); there is a brief interval without `current`. A process/power failure between these renames requires recovery from the `current.before-*` junction, which is cleaned up only after successful activation and saving state. Reinstalling an already active custom release does not switch the junction.
+
+Установка один раз копирует штатный пакет в `<version>-agent-kit`; повторная обновляет тот же `customTarget` на месте, переименовывая занятый exe. При миграции штатный релиз ищется через `current.before-*`, затем по стандартному имени; старый кастомный каталог остаётся для ручного удаления после проверки. `restore` возвращает штатный релиз, `sync-footer` заменяет только футер и удаляет предыдущую копию. Хранятся последние три бэкапа состояния; хвосты удаляются по возможности, занятые пропускаются. `prepare` очищает другие каталоги этой версии только с нашим маркером. Настройки и авторизация не меняются. Между двумя переименованиями junction есть короткий разрыв; при аварии восстанавливайте `current` из `current.before-*`.
+
+Paths (CLI options take precedence over environment):
+
+| Option | Environment | Default |
+|---|---|---|
+| `--native-dir` | `CODEX_NATIVE_DIR` | repository `.native` |
+| `--codex-home` | `CODEX_HOME` | `~/.codex` |
+| `--standalone` | `CODEX_STANDALONE_DIR` | `<CODEX_HOME>/packages/standalone` |
+| `--binary` | `CODEX_NATIVE_BINARY` | last successful build for install; `.native/target/<profile>/codex.exe` for build |
+| `--footer-root` | `CODEX_FOOTER_ROOT` | repository root |
+
+For a disposable install, use `npm run codex:install -- --codex-home <temporary-home> --binary <fake-exe>` after creating a fake standalone stock release and `current` junction. `CARGO_HOME` and PATH are inherited; no toolchain is installed by these scripts.
+
+## Feature manifest
+
+The manifest is the source of feature IDs, English/Russian descriptions, ordering and attribution. Independent features share no edited files; interaction modes deliberately depends on statusline for its payload and refresh state.
+
+| ID / patch file in `codex-0.164.0/` | Dependencies | Description / Описание |
+|---|---|---|
+| `statusline.patch` | — | Native footer / нативный футер, payload, max_lines 32, hidden Plan indicator, config tests |
+| `full-diff.patch` | — | Full compact diffs / полные компактные диффы (booxter) |
+| `exec-timing.patch` | — | Elapsed time and live line counts / время и строки вывода |
+| `capacity-retry.patch` | — | Capacity backoff and stream retry limit 10 / повторы (booxter) |
+| `interaction-modes.patch` | statusline | Plan ↔ Auto, Windows Shift+Tab, payload mode, combined permission update |
+| `restricted-subagents.patch` | — | Spawn `mode: plan\|read_only` / ограниченные сабагенты |
+
+```sh
+npm test
+node scripts/codex/verify-patches.js
+```
+
+The explicit verification command needs the cached source archive. It tests all 48 valid feature combinations with `git -c core.longpaths=true apply --check` and application in a disposable clean tree, then checks the full selection against `tree-sha256.json`, recorded from the former combined patch. The initial split also compared all 9454 tree files byte-for-byte with that patch. Node tests cover manifest/dependency errors, paths, mocked requirements and Windows install/reinstall/sync/restore with fake executables and real junctions. They never launch Codex or access a real account.
 
 The release archive contains workspace package versions stamped as `0.0.0` in Cargo.lock; Cargo updates those to `0.164.0`. External dependency versions do not change.
 The upstream Codex test `status_snapshot_shows_auto_review_permissions` expects `v0.0.0` in the header and fails with this build recipe because Cargo stamps `0.164.0`; this version mismatch is unrelated to the patch.
