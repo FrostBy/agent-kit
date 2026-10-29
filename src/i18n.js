@@ -43,6 +43,7 @@ const UI = {
   g_lang: { en: 'Language', ru: 'Язык' },
   g_money: { en: 'Money: auto — only on API or extra usage', ru: 'Деньги: auto — только API или extra usage' },
   g_gap: { en: 'Empty line after the status line', ru: 'Пустая строка после статуслайна' },
+  g_maxLines: { en: 'Codex footer content lines', ru: 'Строки содержимого футера Codex' },
   g_icons: { en: 'Icons', ru: 'Иконки' },
   g_separator: { en: 'Widget separator', ru: 'Разделитель блоков' },
   g_warn: { en: 'Warning threshold, %', ru: 'Порог «внимание», %' },

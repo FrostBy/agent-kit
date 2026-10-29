@@ -38,6 +38,8 @@ This experiment runs from source: first build Codex following [patches/README.md
 
 The native build is stamped with the upstream 0.164.0 commit, so Codex's bundled voice input keeps working.
 
+The patch also adds full compact diffs, command timing and live-output counts, overload retries, Plan/Auto switching and restricted subagent modes. See [what the patch adds](patches/README.md#what-the-patch-adds) for the full list and attribution.
+
 ```sh
 node scripts/native-codex.js
 ```
@@ -45,6 +47,8 @@ node scripts/native-codex.js
 This starts a separate Codex CLI with our footer inside its interface. Pass a project directory as the second argument if needed. The launcher uses `.native/test-home` and an unauthenticated loopback test provider; it does not edit the installed Codex or user config. Model requests and live account quotas are unavailable in this profile. If Windows offers sandbox setup, press Esc to inspect the footer without installing anything.
 
 Layout and styling follow the original Claude version. Model, effort, context, quotas, active tools, todos, subagents and already-cached PR metadata come from native CLI JSON. Git uses the shared scanner. Unavailable blocks are omitted; the row budget follows terminal height, and Git totals include hidden repositories. See [patches/README.md](patches/README.md) for the patch and limitations.
+
+The native footer ends with a separated auto/plan/read-only mode line; `maxLines` in the Codex footer config (default `4`, also available in `--codex --configure`) limits content only, while terminal height and Codex's explicit `max_lines` remain outer caps; `gapAfter` adds one final blank braille row only when it fits.
 
 ### Standalone log inspector (legacy mode)
 

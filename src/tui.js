@@ -16,6 +16,7 @@ const GLOBAL = [
   { key: 'lang', label: UI.g_lang, type: 'enum', values: ['auto', 'en', 'ru'] },
   { key: 'money', label: UI.g_money, type: 'enum', values: ['auto', 'always'] },
   { key: 'gapAfter', label: UI.g_gap, type: 'bool' },
+  ...(HARNESS === 'codex' ? [{ key: 'maxLines', label: UI.g_maxLines, type: 'number', min: 1, max: 32 }] : []),
   { key: 'icons', label: UI.g_icons, type: 'enum', values: Object.keys(ICONS) },
   { key: 'separator', label: UI.g_separator, type: 'string' },
   { key: 'thresholds.warn', label: UI.g_warn, type: 'number', min: 1, max: 99 },

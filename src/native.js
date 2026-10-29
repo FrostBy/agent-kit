@@ -18,6 +18,7 @@ async function renderNative(snapshot, config, now = Date.now(), sources = {}) {
   const input = {
     ...snapshot,
     harness: 'codex',
+    mode: ['default', 'auto', 'plan', 'read-only'].includes(snapshot.mode) ? snapshot.mode : 'default',
     context_window: cw.context_window_size > 0 ? cw : null,
     workspace: { project_dir: snapshot.project_dir || snapshot.cwd, current_dir: snapshot.cwd },
     quota_windows: windows,
@@ -32,18 +33,25 @@ async function renderNative(snapshot, config, now = Date.now(), sources = {}) {
       .filter((alert) => alert && typeof alert.name === 'string' && alert.name.trim() && Object.hasOwn(labels, alert.status))
       .map((alert) => ({ ...alert, label: labels[alert.status] })),
   } : null;
-  const cfg = { ...config, links: false, widgets: { ...config.widgets, context: { ...config.widgets?.context, ...(cw.used_tokens == null ? { used: false, left: false } : {}) } } };
+  const cfg = { ...config, links: false,
+    lines: config.lines.map((line) => line.filter((item) => (typeof item === 'string' ? item : item?.id) !== 'mode')),
+    widgets: { ...config.widgets, context: { ...config.widgets?.context, ...(cw.used_tokens == null ? { used: false, left: false } : {}) } } };
+  const [mode] = renderLines({ ...cfg, lines: [['mode']] }, { in: input, now });
   let rows = renderLines(cfg, { in: input, now, transcript: activity });
   const alert = activity?.agent_attention[0];
   if (alert && rows.map(stripVTControlCharacters).some((line) => line.includes(`${alert.name} ${alert.label}`) && line.length > (snapshot.columns || 80) - 4)) {
     cfg.widgets.subagents = { ...config.widgets?.subagents, attentionRows: true };
     rows = renderLines(cfg, { in: input, now, transcript: activity });
   }
-  const maxLines = Math.min(32, Math.max(1, (snapshot.rows || 24) - 8));
-  const available = Math.max(1, maxLines - rows.length - Number(!!cfg.gapAfter) - 1);
+  const rowBudget = Math.min(32, Math.max(mode ? 2 : 1, (snapshot.rows || 24) - 8));
+  const maxLines = Math.min(rowBudget - (mode ? 2 : 0),
+    Number.isFinite(config.maxLines) ? Math.max(1, Math.floor(config.maxLines)) : 4);
+  const available = Math.max(1, Math.min(maxLines, rowBudget - (mode ? 2 : 0) - Number(!!cfg.gapAfter)) - rows.length - 1);
   cfg.widgets.git = { ...config.widgets?.git, max: Math.min(optsFor(byId.git, cfg).max, available) };
   const lines = (await render(input, cfg, now, { ...sources, usage: () => null, today: () => null, plan: () => null, transcript: () => activity })).slice(0, maxLines);
-  if (cfg.gapAfter && lines.length && lines.length < maxLines) lines.push('\u2800');
+  // Codex discards empty stdout lines; blank braille preserves the mode spacer.
+  if (mode) lines.push('\u2800', mode);
+  if (cfg.gapAfter && lines.length && lines.length < rowBudget) lines.push('\u2800');
   return lines;
 }
 

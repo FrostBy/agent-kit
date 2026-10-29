@@ -27,6 +27,7 @@ const DEFAULTS = {
 };
 
 const CODEX_DEFAULTS = deepMerge(DEFAULTS, {
+  maxLines: 4,
   lines: [
     DEFAULTS.lines[0],
     ['limits'],

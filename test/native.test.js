@@ -23,6 +23,34 @@ const cfg = (over = {}) => deepMerge(CODEX_DEFAULTS, { color: false, links: fals
 const forbidden = () => { throw new Error('Claude sources must not run'); };
 const umbrella = (count) => ({ mode: 'umbrella', root, repos: Array.from({ length: count }, (_, i) => ({ dir: path.join(root, `repo${i}`), branch: 'main', changed: 3, deleted: 2, staged: 1, untracked: 3, add: 4, del: 5 })) });
 
+test('native mode renders once at the end with a spacer and separately colored hint', async () => {
+  const labels = {
+    auto: '⏵⏵ auto mode on (shift+tab to cycle)',
+    plan: '⏸\uFE0E plan mode on (shift+tab to cycle)',
+    'read-only': 'read-only mode',
+  };
+  for (const lang of ['en', 'ru']) {
+    for (const mode of [undefined, 'default', 'auto', 'plan', 'read-only', 'invalid']) {
+      const input = { ...snapshot(), mode };
+      const rows = await renderNative(input, cfg({ lang, lines: [['mode', 'model', { id: 'mode' }], ['mode']] }), 0, { git: () => null });
+      assert.deepEqual(rows, labels[mode] ? ['GPT-6.1', '\u2800', labels[mode], '\u2800'] : ['GPT-6.1', '\u2800']);
+    }
+  }
+  const previous = process.env.NO_COLOR;
+  delete process.env.NO_COLOR;
+  try {
+    for (const [mode, color] of [['auto', 33], ['plan', 36]]) {
+      const rows = await renderNative({ ...snapshot(), mode }, cfg({ color: true, gapAfter: false }), 0, { git: () => null });
+      const label = labels[mode].replace(' (shift+tab to cycle)', '');
+      assert.equal(rows.at(-1), `\x1b[${color}m${label}\x1b[0m\x1b[90m (shift+tab to cycle)\x1b[0m`);
+      assert.equal(rows.at(-2), '\u2800');
+    }
+  } finally {
+    if (previous === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = previous;
+  }
+});
+
 test('native snapshot keeps the original rows and omits invented counters', async () => {
   let scanned;
   const rows = await renderNative(snapshot(), cfg({ lines: [...CODEX_DEFAULTS.lines, ['codex', 'kimi']] }), 0, {
@@ -41,7 +69,7 @@ test('native snapshot keeps the original rows and omits invented counters', asyn
 
 test('native footer matches the Claude renderer for the same available data', async () => {
   const input = snapshot(), git = () => umbrella(2);
-  const actual = await renderNative(input, cfg(), 0, { git });
+  const actual = await renderNative(input, cfg({ maxLines: 16 }), 0, { git });
   const expected = await render({
     model: input.model, effort: input.effort, pr: input.pr,
     workspace: { project_dir: root, current_dir: input.cwd },
@@ -58,7 +86,7 @@ test('native footer preserves whole-umbrella totals when repositories exceed row
   const input = snapshot();
   for (const height of [24, 16]) {
     input.rows = height;
-    const rows = await renderNative(input, cfg(), 0, { git: () => umbrella(12) });
+    const rows = await renderNative(input, cfg({ maxLines: 16 }), 0, { git: () => umbrella(12) });
     assert.ok(rows.length <= height - 8, rows.join('\n'));
     assert.match(rows.at(-2), /more.*Σ \+48 −60/);
     assert.equal(rows.at(-1), '\u2800');
@@ -74,11 +102,30 @@ test('native footer caps the final rows and adds a gap only when it fits', async
   assert.equal(small.length, 2);
   assert.notEqual(small.at(-1), '\u2800');
   input.rows = 100;
-  const long = await renderNative(input, cfg({ lines: Array.from({ length: 40 }, () => ['model']) }), 0, { git: () => null });
+  const long = await renderNative(input, cfg({ maxLines: 32, lines: Array.from({ length: 40 }, () => ['model']) }), 0, { git: () => null });
   assert.equal(long.length, 32);
   assert.notEqual(long.at(-1), '\u2800');
   const short = await renderNative(input, cfg({ lines: [['model']] }), 0, { git: () => null });
   assert.deepEqual(short, ['GPT-6.1', '\u2800']);
+});
+
+test('native content limit excludes mode, spacer and gap and respects terminal height', async () => {
+  const lines = Array.from({ length: 40 }, () => ['model']);
+  for (const mode of ['auto', 'plan', 'default']) {
+    const input = { ...snapshot(), mode };
+    const suffix = mode === 'default' ? [] : ['\u2800', `${mode === 'auto' ? '⏵⏵' : '⏸\uFE0E'} ${mode} mode on (shift+tab to cycle)`];
+    const render = (options = {}) => renderNative(input, cfg({ lines, ...options }), 0, { git: () => null });
+    assert.deepEqual(await render(), [...Array(4).fill('GPT-6.1'), ...suffix, '\u2800']);
+    assert.deepEqual(await render({ maxLines: 6, gapAfter: false }), [...Array(6).fill('GPT-6.1'), ...suffix]);
+    for (const maxLines of [null, '6', 0, -1, 2.9]) {
+      const count = typeof maxLines === 'number' ? Math.max(1, Math.floor(maxLines)) : 4;
+      assert.deepEqual(await render({ maxLines }), [...Array(count).fill('GPT-6.1'), ...suffix, '\u2800']);
+    }
+    input.rows = 12;
+    assert.deepEqual(await render(), [...Array(4 - suffix.length).fill('GPT-6.1'), ...suffix]);
+    input.rows = 100;
+    assert.equal((await render({ maxLines: 100 })).length, 32);
+  }
 });
 
 test('unknown context and idle runtime do not create fake indicators', async () => {
@@ -139,7 +186,7 @@ test('narrow footer moves attention to one temporary row and retains Git totals'
   input.columns = 80;
   input.rows = 16;
   input.activity.agent_attention = [{ name: 'reviewer', status: 'waiting_approval' }];
-  const rows = await renderNative(input, cfg({ lang: 'ru' }), 0, { git: () => umbrella(12) });
+  const rows = await renderNative(input, cfg({ lang: 'ru', maxLines: 16 }), 0, { git: () => umbrella(12) });
   assert.ok(rows.length <= 8);
   assert.equal(rows[1], 'reviewer ждёт подтверждения');
   assert.match(rows.at(-2), /Σ \+48 −60/);
