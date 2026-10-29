@@ -8,9 +8,9 @@
   <img src="https://img.shields.io/badge/i18n-en%20%7C%20ru-informational" alt="English and Russian">
 </p>
 
-**A statusline for [Claude Code](https://code.claude.com) and patches for [Codex CLI](https://github.com/openai/codex).**
+**Agent kit for [Claude Code](https://code.claude.com) and [Codex CLI](https://github.com/openai/codex): one statusline for both, plus Codex patches.**
 
-- **Claude Code statusline**: context, quotas, git across umbrella repositories, runtime activity, Codex/Kimi executor widgets. Dependency-free Node, TUI editor, English and Russian.
+- **Statusline for Claude Code and Codex** (Codex: native footer or a log panel): context, quotas, git across umbrella repositories, runtime activity, Codex/Kimi executor widgets. Dependency-free Node, TUI editor, English and Russian.
 - **Codex patches**: a native footer driven by the same renderer, full diffs, command timing, capacity retries, Shift+Tab Plan/Auto, restricted subagents. You build Codex yourself from the patched sources; no binaries are shipped.
 - **Faster Codex voice**: a realtime prompt for quicker speech (configuration only).
 
