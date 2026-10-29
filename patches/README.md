@@ -19,7 +19,7 @@ Alongside the native command-backed footer, the Codex 0.164.0 patch includes:
 2. Command elapsed time and completed live-output line counts (`tui/src/exec_cell`): `• Running cmd · 10s · 2 lines`, then `• Ran cmd · 11s`.
 3. Retries for server overload without `Retry-After`, with a 5–60-second backoff, and a default stream retry limit of 10 instead of 5 (`core/src/responses_retry.rs`, `model-provider-info`). Ideas and original patches: [booxter/nix](https://github.com/booxter/nix), `codex-capacity-retry.patch` and `codex-stream-retry-limit.patch`.
 4. Shift+Tab toggles Plan ↔ Auto (Full Access) without a confirmation modal while idle, including Windows terminals reporting Tab+Shift. The built-in Plan indicator is hidden when the custom footer is active; the JSON payload carries `mode`, and our renderer places the mode line last with spacing before it.
-5. Subagent `multi_agents` v2 spawn accepts `mode: plan|read_only` to restrict the child, never to escalate permissions.
+5. Subagent v2 spawn uses a `readonly-`/`plan-` task name prefix to restrict the child, never to escalate permissions. The prefix is stripped before native name validation (lowercase letters, digits, underscores); subsequent calls use the returned path. V1 has no task name and remains stock. Guidance is sent as separate developer instructions, outside tool schemas and descriptions.
 6. Codex's status-line `max_lines` defaults to 32 as a safety ceiling; the footer's `maxLines` option controls its actual content row budget.
 
 ## Prerequisites / Требования
@@ -77,14 +77,14 @@ The manifest is the source of feature IDs, English/Russian descriptions, orderin
 | `exec-timing.patch` | — | Elapsed time and live line counts / время и строки вывода |
 | `capacity-retry.patch` | — | Capacity backoff and stream retry limit 10 / повторы (booxter) |
 | `interaction-modes.patch` | statusline | Plan ↔ Auto, Windows Shift+Tab, payload mode, combined permission update |
-| `restricted-subagents.patch` | — | Spawn `mode: plan\|read_only` / ограниченные сабагенты |
+| `restricted-subagents.patch` | — | `readonly-`/`plan-` task name prefix / префикс имени задачи |
 
 ```sh
 npm test
 node scripts/codex/verify-patches.js
 ```
 
-The explicit verification command needs the cached source archive. It tests all 48 valid feature combinations with `git -c core.longpaths=true apply --check` and application in a disposable clean tree, then checks the full selection against `tree-sha256.json`, recorded from the former combined patch. The initial split also compared all 9454 tree files byte-for-byte with that patch. Node tests cover manifest/dependency errors, paths, mocked requirements and Windows install/reinstall/sync/restore with fake executables and real junctions. They never launch Codex or access a real account.
+The explicit verification command needs the cached source archive. It tests all 48 valid feature combinations with `git -c core.longpaths=true apply --check` and application in a disposable clean tree, then checks the full selection against `tree-sha256.json`, recorded from the current combined tree. The initial split also compared all 9454 tree files byte-for-byte with that patch. Node tests cover manifest/dependency errors, paths, mocked requirements and Windows install/reinstall/sync/restore with fake executables and real junctions. They never launch Codex or access a real account.
 
 The release archive contains workspace package versions stamped as `0.0.0` in Cargo.lock; Cargo updates those to `0.164.0`. External dependency versions do not change.
 The upstream Codex test `status_snapshot_shows_auto_review_permissions` expects `v0.0.0` in the header and fails with this build recipe because Cargo stamps `0.164.0`; this version mismatch is unrelated to the patch.

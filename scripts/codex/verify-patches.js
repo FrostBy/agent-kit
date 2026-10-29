@@ -33,6 +33,10 @@ function verify() {
       if (chosen.some(f => f.dependencies.some(dep => !chosen.some(c => c.id === dep)))) continue;
       reset();
       applyPatches({ work, features: selectFeatures(manifest, chosen.length ? chosen.map(f => f.id).join(',') : 'none') });
+      // Reserved collaboration schemas and their upstream tests must remain byte-for-byte stock.
+      for (const file of ['codex-rs/core/src/tools/handlers/multi_agents_spec.rs', 'codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs']) {
+        assert.deepEqual(fs.readFileSync(path.join(work, file)), originals.get(file).content(), file);
+      }
       count++;
     }
     reset();

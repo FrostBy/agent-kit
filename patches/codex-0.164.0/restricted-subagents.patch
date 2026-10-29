@@ -1,7 +1,7 @@
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -37,6 +37,7 @@
+@@ -37,6 +37,7 @@ use codex_history::ResponseItemEnvelope;
  use codex_prompts::ResolvedModelMessages;
  use codex_protocol::error::AgentErrorContext;
  use codex_protocol::intersect_effective_permission_profiles;
@@ -9,11 +9,10 @@ diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/
  use codex_protocol::protocol::EnvironmentConfigState;
  use codex_thread_store::PersistContext;
  use codex_utils_path_uri::PathUri;
-@@ -45,6 +46,148 @@
- use std::time::Instant;
- 
+@@ -46,6 +47,148 @@ use std::time::Instant;
+
  const AGENT_NAMES: &str = include_str!("../../../assets/agent/agent_names.txt");
-+
+
 +fn read_only_profile(
 +    profile: &codex_protocol::models::PermissionProfile,
 +    roots: &[codex_utils_absolute_path::AbsolutePathBuf],
@@ -155,10 +154,11 @@ diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/
 +        assert_eq!(child, again);
 +    }
 +}
- 
++
  /// Initial input delivered after a spawned agent acquires execution capacity.
  ///
-@@ -877,6 +1020,9 @@
+ /// V2 communication spawns keep the communication and its context paired so centralized
+@@ -877,6 +1020,9 @@ impl LocalAgentControl {
              (None, _) => None,
          };
          let child_create_started_at = Instant::now();
@@ -168,11 +168,10 @@ diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/
          let new_thread = state
              .spawn_child_thread(
                  start_options,
-@@ -890,6 +1036,24 @@
-         agent_metadata.agent_id = Some(new_thread.thread_id);
+@@ -891,6 +1037,24 @@ impl LocalAgentControl {
          let mut pending_spawn =
              PendingSpawn::new(Arc::clone(&state), new_thread.thread_id, membership);
-+
+
 +        if options.mode == Some(crate::agent::types::RestrictedAgentMode::Plan) {
 +            let mut mode = new_thread.thread.config_snapshot().await.collaboration_mode;
 +            mode.mode = codex_protocol::config_types::ModeKind::Plan;
@@ -190,16 +189,17 @@ diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/
 +                .await
 +                .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
 +        }
- 
++
          if let Some(SessionSource::SubAgent(
              subagent_source @ SubAgentSource::ThreadSpawn {
+                 parent_thread_id, ..
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -268,6 +268,48 @@
+@@ -268,6 +268,48 @@ struct AgentControlHarness {
      control: LocalAgentControl,
  }
- 
+
 +#[tokio::test]
 +async fn spawn_restricted_modes_apply_before_initial_input() {
 +    use crate::agent::types::RestrictedAgentMode;
@@ -248,60 +248,110 @@ diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/
 diff --git a/codex-rs/core/src/agent/types.rs b/codex-rs/core/src/agent/types.rs
 --- a/codex-rs/core/src/agent/types.rs
 +++ b/codex-rs/core/src/agent/types.rs
-@@ -25,6 +25,7 @@
- 
+@@ -25,6 +25,7 @@ pub enum SpawnAgentForkMode {
+
  #[derive(Clone, Debug, Default)]
  pub struct SpawnAgentOptions {
 +    pub mode: Option<RestrictedAgentMode>,
      pub fork_parent_spawn_call_id: Option<String>,
      pub fork_mode: Option<SpawnAgentForkMode>,
      pub parent_thread_id: Option<ThreadId>,
-@@ -39,6 +40,13 @@
-     pub disabled_plugin_ids: Option<Vec<String>>,
-     pub multi_agent_v2_usage_hints: Option<ResolvedMultiAgentV2UsageHints>,
+@@ -41,6 +42,59 @@ pub struct SpawnAgentOptions {
      pub cyber_access_program: Option<CyberAccessProgram>,
-+}
-+
-+#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
-+#[serde(rename_all = "snake_case")]
+ }
+
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 +pub enum RestrictedAgentMode {
 +    Plan,
 +    ReadOnly,
- }
- 
++}
++
++impl RestrictedAgentMode {
++    pub(crate) fn from_task_name(task_name: &str) -> (Option<Self>, &str) {
++        if let Some(name) = task_name.strip_prefix("readonly-") {
++            (Some(Self::ReadOnly), name)
++        } else if let Some(name) = task_name.strip_prefix("plan-") {
++            (Some(Self::Plan), name)
++        } else {
++            (None, task_name)
++        }
++    }
++}
++
++#[cfg(test)]
++mod restriction_tests {
++    use super::RestrictedAgentMode;
++    use codex_protocol::AgentPath;
++
++    #[test]
++    fn task_name_prefix_only_restricts_and_preserves_native_validation() {
++        for (input, mode, name) in [
++            (
++                "readonly-review_1",
++                Some(RestrictedAgentMode::ReadOnly),
++                "review_1",
++            ),
++            ("plan-design", Some(RestrictedAgentMode::Plan), "design"),
++            ("review_1", None, "review_1"),
++            ("readonly_review", None, "readonly_review"),
++            ("plan", None, "plan"),
++        ] {
++            assert_eq!(RestrictedAgentMode::from_task_name(input), (mode, name));
++            assert!(AgentPath::root().join(name).is_ok());
++        }
++        for input in [
++            "readonly-",
++            "plan-",
++            "readonly-root",
++            "plan-../escape",
++            "plan-Upper",
++            "readonly-plan-review",
++        ] {
++            let (_, name) = RestrictedAgentMode::from_task_name(input);
++            assert!(AgentPath::root().join(name).is_err(), "{input}");
++        }
++    }
++}
++
  /// Identity and status observed from a loaded agent, without a handle to its runtime.
+ #[derive(Clone, Debug)]
+ pub struct LiveAgent {
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4577,6 +4577,14 @@ impl Session {
+             developer_sections
+                 .push(DeveloperInstructions::new(developer_instructions).render_fragment());
+         }
++        if turn_context.multi_agent_version == MultiAgentVersion::V2 {
++            developer_sections.push(
++                DeveloperInstructions::new(
++                    "For spawn_agent, prefix task_name with readonly- for read-only permissions or plan- for Plan mode. The prefix is removed before native name validation; use the returned task path for later calls. Without a prefix, native behavior is unchanged. These prefixes only restrict the child and do not authorize delegation.",
++                )
++                .render_fragment(),
++            );
++        }
+         let loaded_plugins = self
+             .services
+             .plugins_manager
 diff --git a/codex-rs/core/src/thread_spawn.rs b/codex-rs/core/src/thread_spawn.rs
 --- a/codex-rs/core/src/thread_spawn.rs
 +++ b/codex-rs/core/src/thread_spawn.rs
-@@ -37,6 +37,7 @@
-     pub agent_type: Option<String>,
-     pub model: Option<String>,
-     pub reasoning_effort: Option<ReasoningEffort>,
-+    pub mode: Option<crate::agent::types::RestrictedAgentMode>,
- }
- 
- /// Accepted child and its effective configuration. Acceptance does not mean the turn completed.
-@@ -69,6 +70,7 @@
-         agent_type,
-         model,
-         reasoning_effort,
-+        mode,
-     } = request;
-     let message_text = match &message {
-         AgentMessage::Plaintext(text) | AgentMessage::Encrypted(text) => text,
-@@ -96,6 +98,11 @@
+@@ -96,11 +96,12 @@ pub(crate) async fn spawn(
      .await
      .map_err(ThreadSpawnError::Preparation)?;
      let config = prepared.config;
-+    let mode = mode.or_else(|| {
-+        (step_context.settings.effective_collaboration_mode().mode
-+            == codex_protocol::config_types::ModeKind::Plan)
-+            .then_some(crate::agent::types::RestrictedAgentMode::Plan)
-+    });
++    let (mode, task_name) = crate::agent::types::RestrictedAgentMode::from_task_name(&task_name);
      let task_name = turn
          .session_source
          .get_agent_path()
-@@ -146,6 +153,7 @@
+         .unwrap_or_else(AgentPath::root)
+-        .join(&task_name)
++        .join(task_name)
+         .map_err(ThreadSpawnError::Preparation)?;
+     let spawn_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+         parent_thread_id: session.thread_id,
+@@ -146,6 +147,7 @@ pub(crate) async fn spawn(
              },
              source: spawn_source,
              options: SpawnAgentOptions {
@@ -312,7 +362,7 @@ diff --git a/codex-rs/core/src/thread_spawn.rs b/codex-rs/core/src/thread_spawn.
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
 --- a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
-@@ -125,6 +125,7 @@
+@@ -125,6 +125,7 @@ async fn handle_spawn_agent(
                  /*task_name*/ None,
              )?,
              options: SpawnAgentOptions {
@@ -320,87 +370,3 @@ diff --git a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs b/codex-rs/c
                  fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
                  fork_mode: fork_mode.clone(),
                  parent_thread_id: Some(session.thread_id),
-diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
---- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
-+++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
-@@ -123,6 +123,12 @@
-             .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE)
-     };
-     let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
-+    properties.insert(
-+        "mode".to_string(),
-+        JsonSchema::string(Some(
-+            "Optional `plan` or `read_only`; can only restrict, never escalate.".to_string(),
-+        )),
-+    );
-     if !options.expose_agent_type {
-         properties.remove("agent_type");
-     }
-diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
---- a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
-+++ b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
-@@ -40,6 +40,10 @@
-     assert!(!description.contains("max_concurrent_threads_per_session"));
-     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
-     assert!(properties.contains_key("task_name"));
-+    assert_eq!(
-+        properties["mode"].description.as_deref(),
-+        Some("Optional `plan` or `read_only`; can only restrict, never escalate.")
-+    );
-     assert!(properties.contains_key("message"));
-     assert_eq!(
-         properties
-diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
---- a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
-+++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
-@@ -132,6 +132,7 @@
-             agent_type: args.agent_type.clone(),
-             model: args.model,
-             reasoning_effort: args.reasoning_effort,
-+            mode: args.mode,
-         },
-     )
-     .await
-@@ -208,6 +209,7 @@
-     reasoning_effort: Option<ReasoningEffort>,
-     fork_turns: Option<String>,
-     fork_context: Option<bool>,
-+    mode: Option<crate::agent::types::RestrictedAgentMode>,
- }
- 
- impl SpawnAgentArgs {
-@@ -236,6 +238,34 @@
-         Err(FunctionCallError::RespondToModel(
-             "fork_turns must be `none` or `all`".to_string(),
-         ))
-+    }
-+}
-+
-+#[cfg(test)]
-+mod restriction_tests {
-+    use super::*;
-+    use crate::agent::types::RestrictedAgentMode;
-+
-+    #[test]
-+    fn spawn_mode_accepts_only_restrictions() {
-+        for (mode, expected) in [
-+            ("plan", RestrictedAgentMode::Plan),
-+            ("read_only", RestrictedAgentMode::ReadOnly),
-+        ] {
-+            let args: SpawnAgentArgs = serde_json::from_value(serde_json::json!({
-+                "message": "review", "task_name": "reviewer", "mode": mode,
-+            }))
-+            .unwrap();
-+            assert_eq!(args.mode, Some(expected));
-+        }
-+        for mode in ["default", "auto", "full_access", ""] {
-+            assert!(
-+                serde_json::from_value::<SpawnAgentArgs>(serde_json::json!({
-+                    "message": "review", "task_name": "reviewer", "mode": mode,
-+                }))
-+                .is_err()
-+            );
-+        }
-     }
- }
- 

@@ -11,7 +11,7 @@
 **Agent kit for [Claude Code](https://code.claude.com) and [Codex CLI](https://github.com/openai/codex): one statusline for both, plus Codex patches.**
 
 - **Statusline for Claude Code and Codex** (Codex: native footer or a log panel): context, quotas, git across umbrella repositories, runtime activity, Codex/Kimi executor widgets. Dependency-free Node, TUI editor, English and Russian.
-- **Codex patches**: a native footer driven by the same renderer, full diffs, command timing, capacity retries, Shift+Tab Plan/Auto, restricted subagents. You build Codex yourself from the patched sources; no binaries are shipped.
+- **Codex patches**: a native footer driven by the same renderer, full diffs, command timing, capacity retries, Shift+Tab Plan/Auto, restricted subagents via a `readonly-`/`plan-` task name prefix. You build Codex yourself from the patched sources; no binaries are shipped.
 - **Faster Codex voice**: a realtime prompt for quicker speech (configuration only).
 
 Русская версия: [README.RU.md](README.RU.md)
@@ -75,7 +75,7 @@ Omit `--features` to select all; dependencies are automatic. `--dev` builds debu
 
 The native build is stamped with the upstream 0.164.0 commit, so Codex's bundled voice input keeps working.
 
-The patch also adds full compact diffs, command timing and live-output counts, overload retries, Plan/Auto switching and restricted subagent modes. See [what the patch adds](patches/README.md#what-the-patch-adds) for the full list and attribution.
+The patch also adds full compact diffs, command timing and live-output counts, overload retries, Plan/Auto switching and restricted subagent modes via a `readonly-`/`plan-` task name prefix. See [what the patch adds](patches/README.md#what-the-patch-adds) for the full list and attribution.
 
 ```sh
 npm run codex:build -- --dev
