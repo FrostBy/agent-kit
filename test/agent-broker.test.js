@@ -97,8 +97,10 @@ test('Codex exits archive on /exit, idle timeout and graceful process signals; f
       f.children[0].child.send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
       f.intervals[0]();
     } else f.processMock.emit(mode === 'signal' ? 'SIGTERM' : 'beforeExit');
+    // Exit paths are asynchronous; slower CI runners need more than one settle tick.
+    let request;
+    for (let i = 0; i < 100 && !(request = f.requests.find(r => r.method === 'thread/archive')); i++) await new Promise(r => setTimeout(r, 10));
     await settle();
-    const request = f.requests.find(r => r.method === 'thread/archive');
     assert.deepEqual(request.params, { threadId: 'thread-fixture' });
     assert.equal(f.state().status, 'done'); assert.equal(f.state().archived, mode !== 'archive-error'); assert.deepEqual(f.exits, [0]);
     if (mode === 'archive-error') assert.match(fs.readFileSync(path.join(f.root, 'worker.log'), 'utf8'), /archive failed/);
