@@ -1,10 +1,29 @@
 {
   "name": "agent-kit",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Agent kit for Claude Code and Codex CLI: one dependency-free statusline for both, Codex patches and faster Codex voice.",
-  "bin": { "agent-kit": "statusline.js", "agent-statusline": "statusline.js", "claude-statusline-ultimate": "statusline.js", "agent-broker": "scripts/agents/broker.js", "agent-session-sync": "scripts/agents/sync.js" },
+  "bin": {
+    "agent-kit": "statusline.js",
+    "agent-statusline": "statusline.js",
+    "claude-statusline-ultimate": "statusline.js",
+    "agent-broker": "scripts/agents/broker.js",
+    "agent-session-sync": "scripts/agents/sync.js"
+  },
   "main": "statusline.js",
-  "files": ["statusline.js", "src/", "install.js", "install.sh", "install.cmd", "scripts/codex/", "scripts/agents/", "patches/", "templates/", "README.md", "README.RU.md", "LICENSE"],
+  "files": [
+    "statusline.js",
+    "src/",
+    "install.js",
+    "install.sh",
+    "install.cmd",
+    "scripts/codex/",
+    "scripts/agents/",
+    "patches/",
+    "templates/",
+    "README.md",
+    "README.RU.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test",
     "codex:prepare": "node scripts/codex/cli.js prepare",
@@ -13,11 +32,32 @@
     "codex:restore": "node scripts/codex/cli.js restore",
     "codex:sync-footer": "node scripts/codex/cli.js sync-footer"
   },
-  "engines": { "node": ">=20" },
-  "repository": { "type": "git", "url": "git+https://github.com/FrostBy/agent-kit.git" },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FrostBy/agent-kit.git"
+  },
   "homepage": "https://github.com/FrostBy/agent-kit#readme",
-  "bugs": { "url": "https://github.com/FrostBy/agent-kit/issues" },
-  "keywords": ["codex", "openai", "claude", "claude-code", "statusline", "status-line", "anthropic", "cli", "terminal", "git", "monorepo", "rate-limit", "tui"],
+  "bugs": {
+    "url": "https://github.com/FrostBy/agent-kit/issues"
+  },
+  "keywords": [
+    "codex",
+    "openai",
+    "claude",
+    "claude-code",
+    "statusline",
+    "status-line",
+    "anthropic",
+    "cli",
+    "terminal",
+    "git",
+    "monorepo",
+    "rate-limit",
+    "tui"
+  ],
   "author": "Vladislav Romanovsky <frost.by@gmail.com>",
   "license": "MIT"
 }
