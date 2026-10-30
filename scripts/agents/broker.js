@@ -211,7 +211,21 @@ function runCodex() {
   }
 
   const startTurn = async (text, images = []) => {
-    const res = await request('turn/start', { threadId, input: input(text, images), ...(opt.effort ? { effort: opt.effort } : {}) });
+    const params = { threadId, input: input(text, images), ...(opt.effort ? { effort: opt.effort } : {}) };
+    let res;
+    try {
+      res = await request('turn/start', params);
+    } catch (error) {
+      // Поток заархивировали снаружи, пока брокер был подключен: turn/start отвечает
+      // "thread not found"/"is archived". Один раз возвращаем поток из архива и повторяем.
+      if (!/thread not found|is archived/i.test(error?.message ?? '')) throw error;
+      log(`turn/start rejected (${error.message}); unarchive and resume thread ${threadId}`);
+      await request('thread/unarchive', { threadId });
+      state.archived = false; save();
+      await request('thread/resume', { threadId, ...threadParams() });
+      attempt = 0;
+      res = await request('turn/start', params);
+    }
     turnId = res.turn?.id ?? turnId;
     state.status = 'running';
     state.turnId = turnId;

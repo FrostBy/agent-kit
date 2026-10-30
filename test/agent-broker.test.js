@@ -141,6 +141,61 @@ test('failed/serverOverloaded turns keep the agent idle and accept inbox without
   assert.equal(f.requests.filter(r => r.method === 'turn/start').length, 2);
 });
 
+test('turn/start on an externally archived thread unarchives, resumes once and retries the message', async t => {
+  for (const message of ['thread not found: saved-thread', 'thread is archived']) {
+    const f = fixture(t, 'codex');
+    fs.writeFileSync(path.join(f.root, 'worker.state.json'), JSON.stringify({ agent: 'codex', threadId: 'saved-thread', status: 'idle', turns: 1 }));
+    f.run(); await settle();
+    assert.equal(f.state().status, 'idle');
+    let recovered = false;
+    f.answers['turn/start'] = () => {
+      if (!recovered) { recovered = true; return { error: { code: -32600, message } }; }
+      return { result: { turn: { id: 'turn-after-recovery' } } };
+    };
+    fs.writeFileSync(path.join(f.root, 'worker.inbox', '001'), 'continue after archive');
+    f.intervals[0](); await settle();
+    const after = f.requests.slice(f.requests.findLastIndex(r => r.method === 'initialize'));
+    assert.deepEqual(after.filter(r => r.method.startsWith('thread/')).map(r => r.method), ['thread/read', 'thread/resume', 'thread/unarchive', 'thread/resume']);
+    assert.equal(f.requests.filter(r => r.method === 'turn/start').length, 2);
+    assert.equal(f.state().archived, false);
+    assert.match(fs.readFileSync(path.join(f.root, 'worker.log'), 'utf8'), /unarchive and resume/);
+    f.children[0].child.send({ method: 'turn/completed', params: { threadId: 'saved-thread', turn: { id: 'turn-after-recovery', status: 'completed' } } });
+    await settle();
+    assert.equal(f.state().status, 'idle'); assert.equal(f.state().turns, 2);
+  }
+});
+
+test('non-archive turn/start errors still surface as a failed message', async t => {
+  const f = fixture(t, 'codex'); f.run(); await settle();
+  f.children[0].child.send({ method: 'turn/completed', params: { threadId: 'thread-fixture', turn: { id: 'turn-fixture', status: 'completed' } } });
+  await settle();
+  f.answers['turn/start'] = () => ({ error: { code: -32602, message: 'invalid params' } });
+  fs.writeFileSync(path.join(f.root, 'worker.inbox', '001'), 'broken request');
+  f.intervals[0](); await settle();
+  assert(!f.requests.some(r => r.method === 'thread/unarchive'));
+  assert.equal(f.state().status, 'idle');
+  assert.match(fs.readFileSync(path.join(f.root, 'worker.out.md'), 'utf8'), /сообщение не принято сервером/);
+});
+
+test('archive protects live broker state in the default Claude scratchpad without --state', async t => {
+  const scratch = path.join(os.tmpdir(), 'claude');
+  if (!fs.existsSync(scratch)) { t.skip('no Claude scratchpad'); return; }
+  const f = fixture(t, 'codex'), { archiveSessions } = require('../scripts/agents/archive-broker-sessions');
+  const dir = path.join(f.root, 'sessions'); fs.mkdirSync(dir);
+  const old = new Date(Date.now() - 2 * 3600000);
+  for (const id of ['live-default', 'running-default']) {
+    const file = path.join(dir, `rollout-${id}.jsonl`);
+    fs.writeFileSync(file, JSON.stringify({ timestamp: old.toISOString(), type: 'session_meta', payload: { id, originator: 'claude-agent-broker' } }) + '\n');
+    fs.utimesSync(file, old, old);
+  }
+  const marker = `archive-default-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(path.join(scratch, `${marker}-live.state.json`), JSON.stringify({ agent: 'codex', threadId: 'live-default', pid: process.pid, status: 'idle' }));
+  fs.writeFileSync(path.join(scratch, `${marker}-running.state.json`), JSON.stringify({ agent: 'codex', threadId: 'running-default', pid: 999999999, status: 'running' }));
+  t.after(() => { for (const suffix of ['live', 'running']) fs.rmSync(path.join(scratch, `${marker}-${suffix}.state.json`), { force: true }); });
+  const result = await archiveSessions({ home: f.root, env: f.processMock.env, log: () => {}, connect: () => { throw new Error('must not connect in dry-run'); } });
+  assert.equal(result.candidates, 0); assert.equal(f.children.length, 0);
+});
+
 test('archive command is dry-run by default and archives only old idle broker sessions via proxy', async t => {
   const f = fixture(t, 'codex'), { archiveSessions } = require('../scripts/agents/archive-broker-sessions');
   const { connectProxy } = require('../src/agents/codex-client');

@@ -59,7 +59,10 @@ function protectedThreads(stateDirs) {
 }
 async function archiveSessions({ home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), minutes = 60, apply = false, stateDirs = [], claudeConfigDirs = [], env = process.env, connect = connectProxy, log = console.log, now = Date.now() } = {}) {
   if (!Number.isFinite(minutes) || minutes <= 0) throw Error('--minutes must be positive');
-  const protectedIds = protectedThreads(stateDirs), mirrors = syncThreads({ env, claudeConfigDirs }), rows = new Map();
+  // Без --state живые брокеры не защищены: по умолчанию защищаем корень scratchpad Claude Code.
+  const scratchpad = path.join(os.tmpdir(), 'claude');
+  const stateDirsAll = fs.existsSync(scratchpad) && !stateDirs.includes(scratchpad) ? [scratchpad, ...stateDirs] : stateDirs;
+  const protectedIds = protectedThreads(stateDirsAll), mirrors = syncThreads({ env, claudeConfigDirs }), rows = new Map();
   for (const id of mirrors) log(`Protected sync thread: ${id}`);
   for (const file of files(path.join(home, 'sessions'))) {
     const row = await inspect(file); if (!row) continue;
@@ -80,7 +83,7 @@ async function archiveSessions({ home = process.env.CODEX_HOME || path.join(os.h
     for (const row of candidates) {
       try {
         const current = await Promise.all(row.files.map(inspect));
-        if (protectedThreads(stateDirs).has(row.id) || syncThreads({ env, claudeConfigDirs }).has(row.id) || current.some(s => !s || s.running || Date.now() - s.at <= minutes * 60000)) continue;
+        if (protectedThreads(stateDirsAll).has(row.id) || syncThreads({ env, claudeConfigDirs }).has(row.id) || current.some(s => !s || s.running || Date.now() - s.at <= minutes * 60000)) continue;
         const live = await client.request('thread/read', { threadId: row.id, includeTurns: false });
         if (live.thread?.status?.type === 'active') continue;
         if (syncThreads({ env, claudeConfigDirs }).has(row.id)) continue;
