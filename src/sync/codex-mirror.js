@@ -10,7 +10,7 @@ async function createCodexMirror(endpoint, title, entries, config, { checkpoint,
   deadline = Date.now() + 27000, env = process.env, connect = connectProxy } = {}) {
   let client;
   const open = async () => {
-    client = connect({ env: { ...env, CODEX_HOME: config.codexHome, CLAUDE_CONFIG_DIR: config.claudeHome }, timeout: 5000 });
+    client = connect({ env: { ...env, CODEX_HOME: config.codexHome, CLAUDE_CONFIG_DIR: config.claudeHome }, mode: 'proxy', timeout: 5000 });
     await client.ready;
     await request('initialize', { clientInfo: { name: 'agent-kit-session-sync', version: '1' } }); client.notify('initialized', {});
   };

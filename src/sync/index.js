@@ -438,7 +438,7 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
       reads[kind] = await scan(kind, sourceEndpoint);
       const source = reads[kind]?.records || [];
       const eligibilityRecords = kind === 'codex' ? [{ type: 'session_meta', payload: { ...sourceEndpoint.meta,
-        ...(sourceEndpoint.mirror && sourceEndpoint.managed === 'app-server' && sourceEndpoint.meta?.originator === 'agent-kit-session-sync'
+        ...(sourceEndpoint.mirror && sourceEndpoint.managed === 'app-server' && (!sourceEndpoint.createdBy || sourceEndpoint.createdBy === 'agent-kit-session-sync')
           ? { source: 'cli', originator: 'codex-tui' } : {}) } }] : source;
       if (!pair && (source.some(r => r.type === 'session-sync-mirror') || sourceEndpoint.meta?.session_sync?.mirror || sourceEndpoint.meta?.originator === 'agent-kit-session-sync')) throw Error('Orphan mirror: refusing mirror of mirror');
       if (sourceEndpoint.eligible === undefined || (input.hook_event_name === 'SessionStart' && (!cliIdentity || sourceEndpoint.cliIdentity !== cliIdentity))) {

@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const readline = require('node:readline');
 const { connectProxy } = require('../../src/agents/codex-client');
+const { syncThreads } = require('../../src/agents/sync-protection');
 function* files(dir) {
   let entries; try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
   for (const entry of entries) {
@@ -56,19 +57,20 @@ function protectedThreads(stateDirs) {
   }
   return ids;
 }
-async function archiveSessions({ home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), minutes = 60, apply = false, stateDirs = [], env = process.env, connect = connectProxy, log = console.log, now = Date.now() } = {}) {
+async function archiveSessions({ home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), minutes = 60, apply = false, stateDirs = [], claudeConfigDirs = [], env = process.env, connect = connectProxy, log = console.log, now = Date.now() } = {}) {
   if (!Number.isFinite(minutes) || minutes <= 0) throw Error('--minutes must be positive');
-  const protectedIds = protectedThreads(stateDirs), rows = new Map();
+  const protectedIds = protectedThreads(stateDirs), mirrors = syncThreads({ env, claudeConfigDirs }), rows = new Map();
+  for (const id of mirrors) log(`Protected sync thread: ${id}`);
   for (const file of files(path.join(home, 'sessions'))) {
     const row = await inspect(file); if (!row) continue;
     const old = rows.get(row.id);
     if (old) { old.at = Math.max(old.at, row.at); old.running ||= row.running; old.files.push(file); }
     else rows.set(row.id, { ...row, files: [file] });
   }
-  const candidates = [...rows.values()].filter(row => !row.running && !protectedIds.has(row.id) && now - row.at > minutes * 60000);
+  const candidates = [...rows.values()].filter(row => !row.running && !protectedIds.has(row.id) && !mirrors.has(row.id) && now - row.at > minutes * 60000);
   for (const row of candidates) log(`${apply ? 'Candidate' : 'Dry-run'}: ${row.id} idle ${Math.floor((now - row.at) / 60000)} min`);
   log(`${candidates.length} candidate(s); ${apply ? 'apply' : 'dry-run, no app-server connection'}.`);
-  if (!apply || !candidates.length) return { candidates: candidates.length, archived: 0, failed: 0 };
+  if (!apply || !candidates.length) return { candidates: candidates.length, archived: 0, failed: 0, protectedSync: [...mirrors], candidateIds: candidates.map(row => row.id) };
   const client = connect({ env: { ...env, CODEX_HOME: path.resolve(home) }, timeout: 5000, log });
   let archived = 0, failed = 0;
   try {
@@ -78,23 +80,25 @@ async function archiveSessions({ home = process.env.CODEX_HOME || path.join(os.h
     for (const row of candidates) {
       try {
         const current = await Promise.all(row.files.map(inspect));
-        if (protectedThreads(stateDirs).has(row.id) || current.some(s => !s || s.running || Date.now() - s.at <= minutes * 60000)) continue;
+        if (protectedThreads(stateDirs).has(row.id) || syncThreads({ env, claudeConfigDirs }).has(row.id) || current.some(s => !s || s.running || Date.now() - s.at <= minutes * 60000)) continue;
         const live = await client.request('thread/read', { threadId: row.id, includeTurns: false });
         if (live.thread?.status?.type === 'active') continue;
+        if (syncThreads({ env, claudeConfigDirs }).has(row.id)) continue;
         await client.request('thread/archive', { threadId: row.id }); archived++;
         log(`Archived: ${row.id}`);
       } catch (error) { failed++; log(`Archive failed ${row.id}: ${error.message || JSON.stringify(error)}`); }
     }
   } finally { client.close(); }
-  return { candidates: candidates.length, archived, failed };
+  return { candidates: candidates.length, archived, failed, protectedSync: [...mirrors], candidateIds: candidates.map(row => row.id) };
 }
 async function main(args = process.argv.slice(2)) {
-  const options = { stateDirs: [] };
+  const options = { stateDirs: [], claudeConfigDirs: [] };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--apply') options.apply = true;
     else if (args[i] === '--minutes') options.minutes = Number(args[++i]);
     else if (args[i] === '--state') { if (!args[i + 1]) throw Error('Missing --state directory'); options.stateDirs.push(args[++i]); }
-    else throw Error('Usage: archive-broker-sessions.js [--minutes 60] [--state DIR] [--apply]');
+    else if (args[i] === '--claude-config-dir') { if (!args[i + 1] || args[i + 1].startsWith('--')) throw Error('Missing --claude-config-dir directory'); options.claudeConfigDirs.push(args[++i]); }
+    else throw Error('Usage: archive-broker-sessions.js [--minutes 60] [--state DIR] [--claude-config-dir DIR]... [--apply]');
   }
   const result = await archiveSessions(options); if (result.failed) process.exitCode = 1;
 }

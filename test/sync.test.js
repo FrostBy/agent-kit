@@ -19,9 +19,9 @@ async function fixture(t) {
   const env = { HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: path.join(root, 'claude'), CODEX_HOME: path.join(root, 'codex') };
   const config = configuration(path.join(root, 'project'), env);
   config.versions = { claude: 'test-claude', codex: 'test-codex' };
-  config.apiRequests = []; const threads = new Map(); config.apiThreads = threads;
+  config.apiRequests = []; config.apiConnections = []; const threads = new Map(); config.apiThreads = threads;
   const response = thread => ({ thread: config.apiPrefix ? { ...thread, path: config.apiPrefix + thread.path } : thread });
-  config.connectCodex = () => ({ ready: Promise.resolve(), notify() {}, close() {}, async request(method, params, limit) {
+  config.connectCodex = options => (config.apiConnections.push(options), { ready: Promise.resolve(), notify() {}, close() {}, async request(method, params, limit) {
     config.apiRequests.push({ method, params, limit });
     if (config.apiFail === method) throw Error('fake app-server unavailable');
     if (method === 'initialize') return {};
@@ -793,6 +793,20 @@ test('service messages are absent from both injected model context and visible m
   const rollout = await fs.readFile(p.codex.file, 'utf8');
   assert.doesNotMatch(rollout, /SERVICE_|system-reminder|task-notification|command-name|local-command-stdout/);
   assert.equal(f.config.apiThreads.get(p.codex.id).name, 'Actual user request \u00b7 Claude');
+});
+
+test('sync uses daemon proxy without overriding originator and poisoned mirrors sync through pair ownership', async t => {
+  const f = await fixture(t), inherited = { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'claude-agent-broker' };
+  await fs.writeFile(f.file, jsonl([c(f.id, 'Source')])); await hook('claude', f.input(), f.config, { ...opts, env: inherited });
+  const connection = f.config.apiConnections[0];
+  assert.equal(connection.mode, 'proxy'); assert.equal(connection.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, 'claude-agent-broker');
+  assert.equal(inherited.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, 'claude-agent-broker');
+  const p = await f.pair(), rows = (await fs.readFile(p.codex.file, 'utf8')).trim().split('\n').map(JSON.parse);
+  rows[0].payload.originator = 'claude-agent-broker';
+  await fs.writeFile(p.codex.file, jsonl([...rows, x('Real user reply')]));
+  await hook('codex', f.input('codex', p.codex, 'SessionStart'), f.config, opts);
+  const output = await hook('claude', f.input('claude', p.claude, 'UserPromptSubmit'), f.config, opts);
+  assert.match(output.hookSpecificOutput.additionalContext, /Real user reply/);
 });
 
 test('Claude bash-mode pairs across hooks and injects one tag-free user-shell observation', async t => {

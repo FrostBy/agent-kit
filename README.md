@@ -307,6 +307,10 @@ node statusline.js --preview
 
 ## Agent broker and session sync (experimental)
 
+Manual real-daemon/model smoke (not part of npm test): `node scripts/agents/smoke-live.js --live` requests exactly `pong`, sends `/exit`, and verifies `state.archived=true` plus SQLite `archived=1` using read-only access; artifacts are retained. Without `--live` it performs no actions. The manual SQLite check requires Node 22.13+; the broker still supports Node 20.
+
+Sync/broker use `codex app-server proxy`: originator is process-global in Codex 0.166, so initialize cannot isolate it; sync registries/managed checkpoints protect mirrors from both archive paths across default/env/explicit Claude profiles (`--claude-config-dir DIR` is repeatable, corrupt registries fail closed). Proxy only connects to an existing socket; if needed, start the daemon with `codex app-server daemon start`.
+
 Read-only audit: `node scripts/agents/audit-mirror.js --claude "<transcript.jsonl>" [--codex-home DIR] [--count 3] [--json]`. It exercises extraction and the actual presentation renderers, selects related interactive non-broker rollouts, and prints categories/counts/display examples without conversation bodies or tool arguments. RAW, service text as a user message, or insufficient Codex samples exits 1. All unknown/nonportable tools share a bounded assistant-summary fallback that never copies raw outputs. Todo/plan and web operations use native counterparts where sufficient data exists; foreign MCP/agent identities and live actions are never fabricated.
 
 User-message/runtime markup handling:

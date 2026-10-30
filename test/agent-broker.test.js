@@ -15,24 +15,31 @@ function fixture(t, agent) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const prompt = path.join(root, 'prompt.md'); fs.writeFileSync(prompt, 'local fixture');
   const exits = [];
-  const processMock = Object.assign(new EventEmitter(), { env: {}, pid: 123, cwd: () => root, argv: ['node', 'broker.js', '--agent', agent, '--name', 'worker', '--state', root, '--prompt', prompt], exit: code => { exits.push(code); } });
+  const processMock = Object.assign(new EventEmitter(), { env: { HOME: root, USERPROFILE: root }, pid: 123, cwd: () => root, argv: ['node', 'broker.js', '--agent', agent, '--name', 'worker', '--state', root, '--prompt', prompt], exit: code => { exits.push(code); } });
   const children = [], requests = [], intervals = [], timers = [], answers = {};
   function spawn(command, args, options) {
+    const stdio = args.includes('stdio://');
     const child = new EventEmitter();
     child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => {};
     child.stdin = { write(bytes) {
-      if (typeof bytes === 'string') { queueMicrotask(() => child.stdout.write('HTTP/1.1 101 Switching Protocols\r\n\r\n')); return; }
-      const buffer = Buffer.from(bytes), len = buffer[1] & 127;
-      const offset = len < 126 ? 2 : len === 126 ? 4 : 10;
-      const mask = buffer.subarray(offset, offset + 4), payload = buffer.subarray(offset + 4);
-      for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
-      const msg = JSON.parse(payload.toString()); requests.push(msg);
+      if (!stdio && typeof bytes === 'string') { queueMicrotask(() => child.stdout.write('HTTP/1.1 101 Switching Protocols\r\n\r\n')); return; }
+      let msg;
+      if (stdio) msg = JSON.parse(String(bytes).trim());
+      else {
+        const buffer = Buffer.from(bytes), len = buffer[1] & 127;
+        const offset = len < 126 ? 2 : len === 126 ? 4 : 10;
+        const mask = buffer.subarray(offset, offset + 4), payload = buffer.subarray(offset + 4);
+        for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
+        msg = JSON.parse(payload.toString());
+      }
+      requests.push(msg);
       if (msg.id === undefined) return;
       const result = msg.method === 'thread/start' ? { thread: { id: 'thread-fixture' }, model: 'fixture-model' } : msg.method === 'turn/start' ? { turn: { id: 'turn-fixture' } } : {};
       const response = answers[msg.method] ? answers[msg.method](msg) : { result };
       queueMicrotask(() => send({ id: msg.id, ...response }));
     } };
     function send(msg) {
+      if (stdio) { child.stdout.write(JSON.stringify(msg) + '\n'); return; }
       const b = Buffer.from(JSON.stringify(msg));
       const head = b.length < 126 ? Buffer.from([0x81, b.length]) : Buffer.from([0x81, 126, b.length >> 8, b.length & 255]);
       child.stdout.write(Buffer.concat([head, b]));
@@ -52,6 +59,7 @@ test('Codex broker keeps state format and exclusion policy; turns, inbox steerin
   const f = fixture(t, 'codex'); f.run(); await settle();
   assert.equal(f.processMock.env.SESSION_SYNC_BROKER, '1');
   assert.equal(f.children[0].command, 'codex'); assert.deepEqual(Array.from(f.children[0].args), ['app-server', 'proxy']);
+  assert.equal(f.children[0].options.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, undefined);
   const start = f.requests.find(r => r.method === 'thread/start');
   assert.equal(start.params.config.shell_environment_policy.set.SESSION_SYNC_BROKER, '1');
   assert.equal(f.state().threadId, 'thread-fixture'); assert.equal(f.state().status, 'running');
@@ -147,7 +155,7 @@ test('archive command is dry-run by default and archives only old idle broker se
   rollout('eligible', 'claude-agent-broker'); rollout('running', 'claude-agent-broker', true);
   rollout('recent', 'claude-agent-broker', false, true); rollout('native', 'codex-tui'); rollout('live', 'claude-agent-broker');
   fs.writeFileSync(path.join(f.root, 'live.state.json'), JSON.stringify({ agent: 'codex', threadId: 'live', pid: process.pid, status: 'idle' }));
-  const options = { home: f.root, stateDirs: [f.root], log: () => {}, connect: args => connectProxy({ ...args, spawn: f.spawn }) };
+  const options = { home: f.root, env: f.processMock.env, stateDirs: [f.root], log: () => {}, connect: args => connectProxy({ ...args, spawn: f.spawn }) };
   assert.equal((await archiveSessions(options)).candidates, 1); assert.equal(f.children.length, 0);
   const result = await archiveSessions({ ...options, apply: true }); assert.equal(result.archived, 1);
   assert.deepEqual(f.requests.filter(r => r.method === 'thread/archive').map(r => r.params.threadId), ['eligible']);
@@ -185,4 +193,53 @@ test('existing mirror settings are reset through API using an ephemeral user-def
   assert.deepEqual(calls.find(call => call.method === 'thread/start').params, { cwd: '/demo/project', ephemeral: true });
   assert.deepEqual(calls.find(call => call.method === 'thread/settings/update').params, { threadId: 'mirror', sandboxPolicy: policy, approvalPolicy: 'on-request' });
   assert(calls.find(call => call.method === 'thread/resume')); assert(calls.find(call => call.method === 'thread/unsubscribe'));
+});
+
+test('broker shutdown never archives a sync-owned thread, including extra profiles and corrupt registries', async t => {
+  for (const broken of [false, true]) {
+    const f = fixture(t, 'codex'), profile = path.join(f.root, 'work-profile');
+    f.processMock.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE = 'agent-kit-session-sync';
+    f.processMock.argv.push('--claude-config-dir', profile);
+    f.run(); await settle();
+    const dir = path.join(profile, 'agent-kit', 'sync', 'project'); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'pairs.json'), broken ? '{' : JSON.stringify({ version: 2, pairs: [{ id: 'pair', codex: { id: 'thread-fixture', mirror: true, managed: 'app-server' } }] }));
+    f.processMock.emit('SIGTERM'); await settle();
+    assert(!f.requests.some(r => r.method === 'thread/archive')); assert.equal(f.state().archived, false); assert.deepEqual(f.exits, [0]);
+    assert.equal(f.children[0].options.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, 'agent-kit-session-sync');
+    assert.equal(f.processMock.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, 'agent-kit-session-sync');
+  }
+});
+
+test('archive excludes poisoned mirror IDs and rechecks registries immediately before mutation', async t => {
+  const { archiveSessions } = require('../scripts/agents/archive-broker-sessions');
+  const { connectProxy } = require('../src/agents/codex-client');
+  const f = fixture(t, 'codex'), sessions = path.join(f.root, 'sessions'), profile = path.join(f.root, 'work');
+  fs.mkdirSync(sessions); const dir = path.join(profile, 'agent-kit', 'sync', 'project'); fs.mkdirSync(dir, { recursive: true });
+  const writeRegistry = ids => fs.writeFileSync(path.join(dir, 'pairs.json'), JSON.stringify({ version: 2, pairs: ids.map(id => ({ id: 'pair-' + id, codex: { id, managed: 'app-server', mirror: true } })) }));
+  const old = new Date(Date.now() - 2 * 3600000);
+  for (const id of ['mirror', 'broker', 'racing']) {
+    const file = path.join(sessions, `rollout-${id}.jsonl`);
+    fs.writeFileSync(file, JSON.stringify({ timestamp: old.toISOString(), type: 'session_meta', payload: { id, originator: 'claude-agent-broker', source: 'vscode' } }) + '\n'); fs.utimesSync(file, old, old);
+  }
+  writeRegistry(['mirror']);
+  const args = { home: f.root, env: f.processMock.env, claudeConfigDirs: [profile], log: () => {}, connect: opts => connectProxy({ ...opts, spawn: f.spawn }) };
+  const dry = await archiveSessions(args); assert(dry.protectedSync.includes('mirror')); assert(!dry.candidateIds.includes('mirror')); assert.equal(f.children.length, 0);
+  f.answers['thread/read'] = msg => { if (msg.params.threadId === 'racing') writeRegistry(['mirror', 'racing']); return { result: {} }; };
+  await archiveSessions({ ...args, apply: true });
+  assert.deepEqual(f.requests.filter(r => r.method === 'thread/archive').map(r => r.params.threadId), ['broker']);
+  assert(!f.requests.some(r => r.method === 'thread/archive' && ['mirror', 'racing'].includes(r.params.threadId)));
+});
+
+test('archive CLI accepts repeated Claude profile options and dry-run never starts app-server', t => {
+  const f = fixture(t, 'codex'), dirs = ['one', 'two'].map(name => path.join(f.root, name));
+  for (const [n, profile] of dirs.entries()) {
+    const folder = path.join(profile, 'agent-kit', 'sync', 'project'); fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, 'pairs.json'), JSON.stringify({ version: 2, pairs: [{ id: 'pair', codex: { id: 'mirror-' + n } }] }));
+  }
+  const { spawnSync } = require('node:child_process');
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, '../scripts/agents/archive-broker-sessions.js'), '--claude-config-dir', dirs[0], '--claude-config-dir', dirs[1]], {
+    env: { ...process.env, ...f.processMock.env, CODEX_HOME: f.root, AGENT_BROKER_CODEX: 'MUST-NOT-RUN' }, encoding: 'utf8'
+  });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /Protected sync thread: mirror-0/); assert.match(result.stdout, /Protected sync thread: mirror-1/);
+  assert.match(result.stdout, /dry-run, no app-server connection/);
 });

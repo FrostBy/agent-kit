@@ -10,12 +10,13 @@
 const { spawn } = require('node:child_process');
 const { connectProxy } = require('../../src/agents/codex-client');
 const { plain } = require('../../src/agents/codex-path');
+const { syncThreads } = require('../../src/agents/sync-protection');
 const fs = require('node:fs');
 const path = require('node:path');
 
 process.env.SESSION_SYNC_BROKER = '1';
 const argv = process.argv.slice(2);
-const opt = { images: [] };
+const opt = { images: [], claudeConfigDirs: [] };
 for (let i = 0; i < argv.length; i++) {
   const k = argv[i];
   const v = () => { const value = argv[++i]; if (!value || value.startsWith('--')) throw Error(`Missing value for ${k}`); return value; };
@@ -31,10 +32,11 @@ for (let i = 0; i < argv.length; i++) {
   else if (k === '--search') opt.search = true;
   else if (k === '--image') opt.images.push(v());
   else if (k === '--idle-min') opt.idleMin = Number(v());
+  else if (k === '--claude-config-dir') opt.claudeConfigDirs.push(v());
   else throw new Error(`unknown arg ${k}`);
 }
 if (!opt.agent || !opt.name || !opt.state || !opt.prompt) {
-  console.error('usage: agent-broker --agent codex|kimi --name X --state DIR --prompt FILE [--cwd DIR] [--model M] [--effort E] [--sandbox read-only|workspace-write] [--network] [--search] [--image PNG]... [--idle-min 60]');
+  console.error('usage: agent-broker --agent codex|kimi --name X --state DIR --prompt FILE [--cwd DIR] [--model M] [--effort E] [--sandbox read-only|workspace-write] [--network] [--search] [--image PNG]... [--idle-min 60] [--claude-config-dir DIR]...');
   process.exit(2);
 }
 if (!/^[\w-]+$/.test(opt.name)) throw Error('Invalid agent name');
@@ -123,7 +125,7 @@ function runCodex() {
 
   function connect() {
     if (closing) return;
-    const c = connectProxy({ env: process.env, spawn, log, timeout: REQUEST_MS,
+    const c = connectProxy({ env: process.env, mode: 'proxy', spawn, log, timeout: REQUEST_MS,
       onNotification: msg => onMessage(c, msg),
       onDisconnect: why => {
         clearInterval(c.ticker); log(`connection lost: ${why}`);
@@ -160,6 +162,10 @@ function runCodex() {
     state.archived = false;
     try {
       if (threadId) {
+        if (syncThreads({ env: process.env, claudeConfigDirs: opt.claudeConfigDirs }).has(threadId)) {
+          log(`archive skipped: protected sync thread ${threadId}`);
+          return;
+        }
         await request('thread/archive', { threadId }, Math.min(REQUEST_MS, 5000));
         state.archived = true;
       }

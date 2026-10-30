@@ -23,7 +23,7 @@ async function main() {
   await fs.mkdir(config.codexSessionsDir, { recursive: true });
   await fs.writeFile(path.join(config.codexHome, 'config.toml'), `model = "gpt-5.4"\nmodel_provider = "demo"\n[model_providers.demo]\nname = "Isolated offline demo"\nbase_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n[projects.${JSON.stringify(config.cwd)}]\ntrust_level = "trusted"\n`);
   // Dedicated stdio server honours this temp home; never proxy into the user's shared daemon.
-  config.connectCodex = options => connectProxy({ ...options, env, mode: 'stdio', timeout: 5000 });
+  config.connectCodex = options => connectProxy({ ...options, env: { ...env, ...options.env }, mode: 'stdio', timeout: 5000 });
   const getVersion = async exe => (await promisify(execFile)(exe, ['--version'], { env, windowsHide: true, timeout: 5000 })).stdout.match(/\d+\.\d+\.\d+/)?.[0] || 'unknown';
   const claudeVersion = await getVersion('claude'), codexVersion = await getVersion(env.AGENT_BROKER_CODEX || 'codex');
   config.versions = { claude: claudeVersion };
@@ -103,7 +103,7 @@ async function main() {
     if (!items.some(item => item.type === 'commandExecution' && item.commandActions?.some(action => action.type === 'read'))
       || !JSON.stringify(items.find(item => item.type === 'fileChange')).includes('-Hello')) throw Error('Native exploration/diff data missing');
     if (!items.some(item => item.type === 'plan') || !items.some(item => item.type === 'webSearch') || /RAW_MONITOR|PRIVATE_TASK_RAW/.test(JSON.stringify(items))) throw Error('Native plan/web or summary validation failed');
-    console.log(`Native app-server resume verified: ${items.map(item => item.type).join(', ')}.`);
+    console.log(`Native app-server resume verified: originator=${resumed.thread.originator}; ${items.map(item => item.type).join(', ')}.`);
     console.log('Expected Codex: You ran echo manual; Ran echo demo; Edited example.txt (-Hello/+Hi); Explored / Read example.txt.');
     console.log('Expected Claude: native bash-mode echo manual/output; Bash echo demo; Edit example.txt; Bash cat example.txt, all completed.');
   } finally { inspector.close(); }

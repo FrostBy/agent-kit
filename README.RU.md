@@ -307,6 +307,10 @@ node statusline.js --preview
 
 ## Брокер агентов и синхронизация сессий (экспериментально)
 
+Ручной smoke реального демона/модели (не входит в npm test): `node scripts/agents/smoke-live.js --live` запрашивает ровно `pong`, отправляет `/exit`, проверяет `state.archived=true` и SQLite `archived=1` через read-only доступ; артефакты сохраняются. Без `--live` действий нет. Для ручной SQLite-проверки нужен Node 22.13+; брокер по-прежнему поддерживает Node 20.
+
+Sync/broker используют `codex app-server proxy`: originator в Codex 0.166 является process-global, отдельное имя initialize его не изолирует; защита обоих путей архивации — реестры sync/managed-checkpoint из стандартного, env и явно заданных профилей (`--claude-config-dir DIR` повторяемый; повреждённые реестры блокируют архивацию). Proxy только подключается к сокету; при необходимости запустите демон: `codex app-server daemon start`.
+
 Аудит только на чтение: `node scripts/agents/audit-mirror.js --claude "<transcript.jsonl>" [--codex-home DIR] [--count 3] [--json]`. Он проверяет извлечение и реальные render-функции, выбирает интерактивные неброкерские rollout того же проекта/agent-kit, печатает категории, счётчики и примеры отображения без содержимого переписки и аргументов инструментов. RAW, служебный user-текст или нехватка запрошенных Codex-примеров дают exit 1. Для любого неизвестного/непереносимого инструмента действует общий ограниченный assistant-summary fallback; сырые tool outputs не копируются в сообщения-сводки. TodoWrite/update_plan и веб-поиск используют нативные аналоги, когда хватает данных; MCP и агенты другого клиента не получают выдуманные серверы/ID/живые действия.
 
 Обработка user-записей и обёрток (проверены реальные bash-mode записи Claude и protocol/context Codex 0.166):
