@@ -26,7 +26,7 @@ function temp(t) {
 test('Codex uses last-request context, cumulative session tokens and actual quota windows', () => {
   const root = path.resolve('/work');
   const s = codex.apply(jsonl([
-    row('session_meta', { id: 'one', cwd: root, timestamp: new Date(NOW - 60000).toISOString(), cli_version: '0.164.0' }),
+    row('session_meta', { id: 'one', cwd: root, timestamp: new Date(NOW - 60000).toISOString(), cli_version: '9.9.9' }),
     row('turn_context', { model: 'gpt-6.1-sol', effort: 'high', cwd: root }),
     row('event_msg', { type: 'token_count', info: {
       model_context_window: 1000,

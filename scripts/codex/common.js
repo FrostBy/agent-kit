@@ -5,7 +5,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '../..');
-const MANIFEST = path.join(ROOT, 'patches/codex-0.164.0/manifest.json');
+const MANIFEST = path.join(ROOT, 'patches/codex/manifest.json');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const fileHash = file => hash(fs.readFileSync(file));
 
@@ -81,7 +81,7 @@ function checkRequirements({ platform = process.platform, env = process.env, exe
   if (platform !== 'win32') throw new Error('TODO: native Codex build/install support for macOS/Linux; Windows MSVC is currently required.');
   exec('git', ['--version']);
   try { exec('cargo', ['--version']); } catch (error) { throw new Error(`cargo is required: install rustup from https://rustup.rs/ or add cargo to PATH. ${error.message}`); }
-  try { exec('rustup', ['--version']); } catch { warn('rustup unavailable: using cargo from PATH; ensure Rust 1.99.1 is available.'); }
+  try { exec('rustup', ['--version']); } catch { warn('rustup unavailable: using cargo from PATH; ensure compatibility with the source rust-toolchain.toml.'); }
   let msvc = false;
   try { exec('where.exe', ['cl.exe']); exec('where.exe', ['link.exe']); msvc = true; } catch { /* Try the normal VS installation. */ }
   if (!msvc) {

@@ -32,7 +32,8 @@ Fable 5.1 high   ctx ▰▰▱▱▱ 42% 84k/200k   ⚙  Edit render.js   📋 3
   - Git;
   - [rustup](https://rustup.rs) (`winget install Rustlang.Rustup`); the Rust version comes from Codex's `rust-toolchain.toml`;
   - MSVC C++ Build Tools: `winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`;
-  - the official Codex 0.164.0 installed (its package is copied as the base);
+  - the official standalone Codex matching [manifest](patches/codex/manifest.json) installed (its package is copied as the base);
+  - a short `CARGO_HOME` (a manual junction works) or Windows `LongPathsEnabled`; the build prints remediation commands if the rusty_v8 checkout would exceed MAX_PATH;
   - tens of GB of disk and 20+ minutes for the first release build.
 
 The installer only checks these and prints the commands; it never installs tools for you.
@@ -61,7 +62,7 @@ Full diff, capacity retries and faster voice are based on [booxter](https://gith
 
 ### Native footer in the custom CLI
 
-Build locally on Windows x64: Node.js 20+, Git, rustup and MSVC C++ Build Tools with Windows SDK are required. Codex pins Rust 1.99.1. We distribute source patches, not binaries. macOS/Linux build and installation are TODOs with explicit errors.
+Build locally on Windows x64: Node.js 20+, Git, rustup and MSVC C++ Build Tools with Windows SDK are required. The source `rust-toolchain.toml` defines the required Rust version. We distribute source patches, not binaries. macOS/Linux build and installation are TODOs with explicit errors.
 
 ```sh
 npm run codex:prepare
@@ -71,9 +72,11 @@ npm run codex:sync-footer
 npm run codex:restore
 ```
 
-Omit `--features` to select all; dependencies are automatic. `--dev` builds debug instead of release. Installation copies an existing official standalone package into `<version>-agent-kit`, retains rollback state and respects `CODEX_HOME` / `--standalone`; it does not edit config or auth. Reinstallation updates the same custom release in place, renaming a locked executable. Manual custom installations are migrated by finding the official stock release; the old custom directory is retained for manual removal. See [prerequisites, paths and limitations](patches/README.md#prerequisites--требования) and the [feature manifest](patches/codex-0.164.0/manifest.json). After JS changes, `codex:sync-footer` updates the packaged renderer.
+Omit `--features` to select all; dependencies are automatic. `--dev` builds debug instead of release. Installation copies an existing official standalone package into `<version>-agent-kit`, retains rollback state and respects `CODEX_HOME` / `--standalone`; it does not edit config or auth. Reinstallation updates the same custom release in place, renaming a locked executable. Manual custom installations are migrated by finding the official stock release; the old custom directory is retained for manual removal. See [prerequisites, paths and limitations](patches/README.md#prerequisites--требования) and the [feature manifest](patches/codex/manifest.json). After JS changes, `codex:sync-footer` updates the packaged renderer.
 
-The native build is stamped with the upstream 0.164.0 commit, so Codex's bundled voice input keeps working.
+To upgrade, run `npm run codex:restore`, then `codex update` to the version in the manifest, build the matching patched CLI and run `npm run codex:install`. Installation creates a new `<version>-agent-kit`, keeps the old custom release and prints its path; subsequent restore returns to the new official release. Run `codex update` from PowerShell or cmd: Git Bash puts GNU tar first in PATH, causing the internal install.ps1 to fail.
+
+The native build is stamped with the upstream commit from the manifest, so Codex's bundled voice input keeps working.
 
 The patch also adds full compact diffs, command timing and live-output counts, overload retries, Plan/Auto switching and restricted subagent modes via a `readonly-`/`plan-` task name prefix. See [what the patch adds](patches/README.md#what-the-patch-adds) for the full list and attribution.
 
@@ -294,10 +297,40 @@ node statusline.js --preview
 
 ## Credits
 
-- [booxter](https://github.com/booxter): the original Codex patches for full diffs in compact mode, capacity retries and the stream retry limit, and the faster-voice idea ([booxter/nix](https://github.com/booxter/nix)). Ported here to Codex 0.164.0.
+- [booxter](https://github.com/booxter): the original Codex patches for full diffs in compact mode, capacity retries and the stream retry limit, and the faster-voice idea ([booxter/nix](https://github.com/booxter/nix)). The target Codex version is defined in the manifest.
 - [GordonBeeming/codex-statusline](https://github.com/GordonBeeming/codex-statusline) (Apache-2.0): the base of the native footer patch.
 - [OpenAI Codex](https://github.com/openai/codex) (Apache-2.0): patched sources and the voice prompt template. See [patches/NOTICE](patches/NOTICE).
 
 ## Licence
 
 [MIT](LICENSE) © Vladislav Romanovsky
+
+## Agent broker and session sync (experimental)
+
+`node install.js --only broker` shows the broker command; npm also exposes `agent-broker`. It runs Codex through `codex app-server proxy`, or Kimi through its CLI, with an inbox for follow-up messages, steering and interruption. Put `--state` in the scratchpad used by the statusline; existing `.state.json` consumers remain compatible. Executables come from PATH, or `AGENT_BROKER_CODEX` / `AGENT_BROKER_KIMI` (executable paths, not shell commands).
+
+```sh
+node scripts/agents/broker.js --agent codex --name reviewer --state /tmp/scratchpad --prompt /tmp/prompt.md --cwd /path/to/project
+node install.js --only sync
+node scripts/agents/sync.js uninstall
+```
+
+Sync is **off by default**, including with `--yes`; opt in using the experimental checkbox or `--only sync`. Installation adds global hooks to `CLAUDE_CONFIG_DIR/settings.json` and `CODEX_HOME/config.toml` (defaults: `~/.claude`, `~/.codex`). Global hooks let any project work without editing that project. Sync activates only after both clients have visited this cwd: its project table exists in Codex config and its Claude project directory exists. Each originating session gets its own pair, partitioned by cwd. Resume the generated `[Mirror …]` session in the other client. Existing transcripts are never rewritten: later updates arrive as hook context.
+
+Only `SessionStart`, `UserPromptSubmit`, and `Stop` are used: the first two deliver pending context, Stop captures completed work. There is no per-tool process scan. CLI eligibility is reused while its process identity is unchanged; the initial Windows CIM / Unix ps check can be slower. Broker agents (`SESSION_SYNC_BROKER`), `SESSION_SYNC_EXCLUDE`, noninteractive exec/print sessions and subagents/sidechains are excluded. Codex requires a CLI build supporting these experimental hooks and `additionalContext`.
+
+Seeds and backlog replacements use the latest compact summary plus the bounded recent context; without compaction, omitted earlier history is labeled. The default budget is about 50k tokens (UTF-8 bytes / 4), configurable with `SESSION_SYNC_CONTEXT_TOKENS`; compaction or an oversized pending backlog replaces that backlog with current context.
+
+Hook delivery is separate from the seed budget: Claude has a [10,000-character cap](https://code.claude.com/docs/en/hooks#json-output), so sync conservatively uses 10,000 UTF-8 bytes. Codex's `additionalContextLimit` is approximate tokens (`ceil(UTF-8 bytes / 4)`): our 16000 means 64000 bytes, default 2500, 0 unlimited; no explicit maximum beyond `usize` ([spill implementation](.native/codex/codex-rs/hooks/src/output_spill.rs), [estimator](.native/codex/codex-rs/utils/string/src/truncate.rs)). Snapshots and large events are sent in sequential acknowledged chunks, each marked at the start. Busy locks exit silently and expire after 10 seconds; unchanged checkpoints are not rewritten, event keys are bounded to 256, and denied decisions to 128 entries / seven days. CLI PID/start-time checks reuse eligibility across SessionStart; Windows uses local WSH/WMI for identity, falling back to full CIM if unavailable. Mirror versions use transcripts or a cached `--version` query.
+
+Sync transfers user/assistant text and completed tool inputs/results as attributed **plaintext observations**, never live tool calls. Thinking, images, attachments, encrypted compaction data and unfinished tool results are omitted. It makes no network requests and reads no credentials; transferred text can still contain private data from conversations and tools. Rollbacks, invalid records, unknown mirrors and paths outside configured roots fail closed.
+
+Archives live under `CLAUDE_CONFIG_DIR/agent-kit/sync/<cwd-hash>/`: append-only `.events` files plus per-pair checkpoints with byte offsets, keys and pending references; `pairs.json` contains IDs only. Keep state with its mirrors. Installation/removal is idempotent, backs up changed existing settings, and preserves unrelated hooks, subsequent configuration edits, session files and archives. Uninstall removes hooks only; it does not restore an old configuration over newer edits.
+
+Manual offline timing on **copies** of an existing legacy pair (no authentication or client startup):
+
+```sh
+node scripts/agents/measure-sync.js /path/to/session-sync-state/pairs.json
+```
+
+This creates temporary isolated homes, copies only the paired transcripts, imports the old event ledger, reports initial rebuild and repeated CLI hook timings, then removes its temporary tree. Eligibility is prevalidated for offline copies, so the initial CIM/ps probe is excluded; Node startup is included in repeated timings.

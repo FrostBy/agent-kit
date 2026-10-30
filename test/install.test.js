@@ -29,7 +29,7 @@ test('installer flags validate IDs, resolve dependencies and disable Codex outsi
   assert.throws(() => resolveSelection({ only: ['voice'] }, 'linux'), /TODO/);
   assert.deepEqual(resolveSelection({ yes: true }, 'darwin').selected.map(i => i.id), ['claude']);
   assert.deepEqual(resolveSelection({ only: ['claude'], skip: ['claude'] }).selected, []);
-  assert(items('linux').filter(i => i.id !== 'claude').every(i => !i.available));
+  assert(items('linux').filter(i => !['claude', 'broker', 'sync'].includes(i.id)).every(i => !i.available));
 });
 
 test('installer lists without changes, refuses implicit non-TTY actions and preflights before executing', async t => {

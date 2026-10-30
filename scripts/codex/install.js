@@ -2,7 +2,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { locations, fileHash, under, readManifest, removeBestEffort } = require('./common');
+const common = require('./common');
+const { locations, fileHash, under, readManifest, removeBestEffort } = common;
 
 function assertWindows(platform = process.platform) {
   if (platform !== 'win32') throw new Error('TODO: macOS/Linux native installation; Windows junctions are currently required.');
@@ -13,8 +14,9 @@ function activeTarget(base) {
   return under(fs.realpathSync(current), path.join(base, 'releases'));
 }
 function stateFile(base) { return path.join(base, 'agent-statusline-state.json'); }
-function isStock(target) {
+function isStock(target, version = readManifest().version) {
   return /^\d+\.\d+\.\d+-(?:x86_64|aarch64|i686)-[a-z0-9_]+-[a-z0-9_-]+$/.test(path.basename(target))
+    && path.basename(target).startsWith(`${version}-`)
     && fs.existsSync(path.join(target, 'bin/codex.exe'))
     && !fs.existsSync(path.join(target, 'codex-resources/agent-statusline'));
 }
@@ -30,13 +32,29 @@ function findStock(base, active, version) {
   }
   const fallback = path.join(base, `releases/${version}-x86_64-pc-windows-msvc`);
   if (isStock(fallback)) return fallback;
-  throw new Error('Official stock Codex release not found. Restore an official standalone package or its current.before-* junction; a release containing agent-statusline cannot be stock.');
+  throw stockReleaseError(version);
 }
-function readState(base) {
+function stockReleaseError(version = readManifest().version) {
+  return new Error(`Official stock Codex release not found for target version ${version}. The standalone package and voice host must come from this release. Install the official package in PowerShell: & ([scriptblock]::Create((irm https://chatgpt.com/codex/install.ps1))) -Release ${version}`);
+}
+function assertStockBuild(target) {
+  const manifest = readManifest();
+  try {
+    const commit = common.run(path.join(target, 'codex-resources/voice/bin/codex-voice-host.exe'), ['--build-commit'], { timeout: 10000 });
+    if (commit !== manifest.commit) throw new Error('voice host build commit differs from manifest');
+  } catch (error) {
+    throw new Error(`Stock voice host does not match the pinned build: ${error.message}. ${stockReleaseError().message}`);
+  }
+}
+function readState(base, mode) {
   const state = JSON.parse(fs.readFileSync(stateFile(base), 'utf8'));
   under(state.stockTarget, path.join(base, 'releases'));
   under(state.customTarget, path.join(base, 'releases'));
-  if (!isStock(state.stockTarget)) throw new Error('State does not reference an official stock release');
+  const version = path.basename(state.stockTarget).match(/^(\d+\.\d+\.\d+)-/)?.[1];
+  if (mode === 'upgrade' && version && version !== readManifest().version) return state;
+  const expectedVersion = mode === 'restore' ? version : undefined;
+  if (!isStock(state.stockTarget, expectedVersion)) throw stockReleaseError(expectedVersion);
+  if (mode !== 'restore') assertStockBuild(state.stockTarget);
   if (fileHash(path.join(state.stockTarget, 'bin/codex.exe')) !== state.stockSha256) throw new Error('Stock executable hash changed');
   return state;
 }
@@ -115,9 +133,11 @@ function cleanupInstall(base, custom, latestBackup) {
 function install(opts = {}) {
   assertWindows();
   const dirs = locations(opts), base = dirs.standalone, active = activeTarget(base), manifest = readManifest();
-  const previous = fs.existsSync(stateFile(base)) ? readState(base) : null;
-  if (previous && active !== previous.customTarget && active !== previous.stockTarget) throw new Error('Active runtime changed; refusing installation');
-  const stock = previous?.stockTarget || findStock(base, active, manifest.version);
+  const previous = fs.existsSync(stateFile(base)) ? readState(base, 'upgrade') : null;
+  const upgrade = previous && !path.basename(previous.stockTarget).startsWith(`${manifest.version}-`);
+  const stock = previous && !upgrade ? previous.stockTarget : findStock(base, active, manifest.version);
+  if (previous && active !== previous.customTarget && active !== previous.stockTarget && !(upgrade && active === stock)) throw new Error('Active runtime changed; refusing installation');
+  assertStockBuild(stock);
   const stockSha256 = fileHash(path.join(stock, 'bin/codex.exe'));
   if (!opts.binary && !process.env.CODEX_NATIVE_BINARY) {
     const build = JSON.parse(fs.readFileSync(path.join(dirs.native, 'metadata/build.json'), 'utf8'));
@@ -129,12 +149,12 @@ function install(opts = {}) {
   }
   const binaryHash = fileHash(dirs.binary);
   const id = crypto.randomUUID();
-  const custom = under(previous?.customTarget || path.join(base, `releases/${manifest.version}-agent-kit`), path.join(base, 'releases'));
-  if (!previous && fs.existsSync(custom)) throw new Error(`Custom destination already exists without state: ${custom}`);
+  const custom = under(previous && !upgrade ? previous.customTarget : path.join(base, `releases/${manifest.version}-agent-kit`), path.join(base, 'releases'));
+  if ((!previous || upgrade) && fs.existsSync(custom)) throw new Error(`Custom destination already exists without state: ${custom}`);
   const backup = under(path.join(base, `statusline-backups/${id}`), base);
   fs.mkdirSync(backup, { recursive: true });
   if (previous) fs.copyFileSync(stateFile(base), path.join(backup, 'previous-state.json'));
-  if (!previous) fs.cpSync(stock, custom, { recursive: true, dereference: true });
+  if (!previous || upgrade) fs.cpSync(stock, custom, { recursive: true, dereference: true });
   copyVerified(dirs.binary, path.join(custom, 'bin/codex.exe'));
   if (fileHash(path.join(custom, 'bin/codex.exe')) !== binaryHash) throw new Error('Built executable changed during installation');
   replaceFooter(dirs.footer, path.join(custom, 'codex-resources/agent-statusline'));
@@ -147,12 +167,13 @@ function install(opts = {}) {
   try { fs.renameSync(pending, stateFile(base)); } catch (error) { switchCurrent(base, active); throw error; }
   cleanupInstall(base, custom, backup);
   console.log(`Installed: ${custom}\nRollback state: ${backup}`);
+  if (upgrade) console.log(`Previous custom release retained: ${previous.customTarget}\nYou may delete it manually after checking the new installation and closing old processes.`);
   if (!previous && active !== stock) console.log(`Previous custom release retained: ${active}\nYou may delete it manually after checking the new installation and closing old processes.`);
   return state;
 }
 function restore(opts = {}) {
   assertWindows();
-  const { standalone: base } = locations(opts), state = readState(base), active = activeTarget(base);
+  const { standalone: base } = locations(opts), state = readState(base, 'restore'), active = activeTarget(base);
   if (active === state.stockTarget) return state;
   if (active !== state.customTarget) throw new Error('Active runtime changed; refusing restore');
   switchCurrent(base, state.stockTarget);

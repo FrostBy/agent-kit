@@ -1,19 +1,17 @@
 # Native Codex footer experiment
 
-The feature patches in [`codex-0.164.0/manifest.json`](codex-0.164.0/manifest.json) target the official OpenAI Codex tag `rust-v0.164.0`.
-It is based on [GordonBeeming/codex-statusline](https://github.com/GordonBeeming/codex-statusline), patch version 5, ported from Codex 0.163.0.
+The feature patches in [`codex/manifest.json`](codex/manifest.json) target the official OpenAI Codex version recorded in that manifest.
+It is based on [GordonBeeming/codex-statusline](https://github.com/GordonBeeming/codex-statusline), patch version 5, ported to the target source.
 The native patch is covered by [Apache-2.0](LICENSE.Apache-2.0); upstream notices are preserved in [NOTICE](NOTICE).
 
-Source archive: <https://codeload.github.com/openai/codex/zip/refs/tags/rust-v0.164.0>
-
-SHA-256: `9c26a6a226a7b96bc9086225e5efc8b6db1192bc9929224cb93eb5a868508155`.
+The target version, archive commit and archive SHA-256 are defined only in the manifest. Source archives use the official `rust-v<version>` tag.
 The original third-party patch SHA-256 is `b04618aafb098cced02a530313d66cc65edd12836ecb9d00cf14b650390b84e3`.
 
 The port preserves the original project directory for umbrella scans, exports exact last-request context tokens and cumulative reasoning tokens, and adds Windows command/timeout tests. Unavailable cache-write usage is omitted.
 
 ## What the patch adds
 
-Alongside the native command-backed footer, the Codex 0.164.0 patch includes:
+Alongside the native command-backed footer, the Codex patch includes:
 
 1. Full edit diffs in compact mode (`tui/src/history_cell/patches.rs`). Idea and original patch: [booxter/nix](https://github.com/booxter/nix), `patches/codex-show-full-patches.patch`.
 2. Command elapsed time and completed live-output line counts (`tui/src/exec_cell`): `• Running cmd · 10s · 2 lines`, then `• Ran cmd · 11s`.
@@ -24,11 +22,13 @@ Alongside the native command-backed footer, the Codex 0.164.0 patch includes:
 
 ## Prerequisites / Требования
 
-Windows x64, Node.js 20+, Git, [rustup](https://rustup.rs/) and Visual Studio MSVC C++ Build Tools (including the Windows SDK). Codex's `rust-toolchain.toml` selects Rust 1.99.1. If rustup is absent, the build accepts cargo from PATH with a warning; that toolchain must be compatible. MSVC is discovered through cl/link or vswhere. Missing tools produce an actionable error, including the Build Tools winget command.
+Windows x64, Node.js 20+, Git, [rustup](https://rustup.rs/) and Visual Studio MSVC C++ Build Tools (including the Windows SDK). Codex's `rust-toolchain.toml` selects the required Rust version. If rustup is absent, the build accepts cargo from PATH with a warning; that toolchain must be compatible. MSVC is discovered through cl/link or vswhere. Missing tools produce an actionable error, including the Build Tools winget command.
 
-Windows x64, Node.js 20+, Git, rustup и MSVC C++ Build Tools с Windows SDK. Версию Rust 1.99.1 задаёт исходный Codex. Без rustup допустим совместимый cargo из PATH с предупреждением. macOS/Linux build/install are explicit TODOs and stop with an error; source preparation and patch verification use portable Node code.
+Windows x64, Node.js 20+, Git, rustup и MSVC C++ Build Tools с Windows SDK. Версию Rust задаёт `rust-toolchain.toml` исходного Codex. Без rustup допустим совместимый cargo из PATH с предупреждением. macOS/Linux build/install are explicit TODOs and stop with an error; source preparation and patch verification use portable Node code.
 
-Only source patches are distributed; build the binary locally. Installation requires an existing official standalone package with a `current` junction and matching 0.164.0 voice/resources. No npm dependencies are required.
+On Windows, use a short `CARGO_HOME` (a manually created junction is supported) or enable `LongPathsEnabled`; the build checks the rusty_v8 checkout path budget and prints commands before preparation if it would exceed MAX_PATH.
+
+Only source patches are distributed; build the binary locally. Installation requires an existing official standalone package with a `current` junction and voice/resources matching the manifest version. No npm dependencies are required.
 
 ## Build and install / Сборка и установка
 
@@ -44,11 +44,13 @@ npm run codex:restore
 
 `prepare` downloads the pinned GitHub tag archive only when missing, verifies SHA-256 and the ZIP comment commit, and extracts clean sources into `.native/work/<version>-<feature-hash>`. It never changes `.native/codex`. `build` prepares again, applies patches in manifest order, and runs cargo with `.native/target` as `CARGO_TARGET_DIR`; release is the default, `--dev` selects debug. `--features none` builds upstream without patches; omitted `--features` selects all. Existing recognized work directories for the same selection are recreated; other directories for this version with our valid source marker are removed best effort after preparation. Foreign directories and other versions are untouched; do not edit generated sources.
 
-Both `STABLE_GIT_COMMIT` and `CODEX_BUILD_COMMIT` are set to `6aaac694803004a63c6f393d153c96d22521a6b9`, the archive commit. Without this stamp, the bundled voice component rejects the `dev` build handshake. The official package's voice host must have the same build commit.
+Both `STABLE_GIT_COMMIT` and `CODEX_BUILD_COMMIT` are set to the archive commit from the manifest. Without this stamp, the bundled voice component rejects the `dev` build handshake. The official package's voice host must have the same build commit.
 
-`install` copies the stock package once into the stable sibling release `<version>-agent-kit`, replaces `bin/codex.exe`, and copies `statusline.js`, `package.json`, `LICENSE`, and `src/` into `codex-resources/agent-statusline`. Executable and footer copies are hash-verified. With existing state, reinstall updates the same `customTarget` in place without copying the package again. A locked executable is renamed to `.retired-*` before copying; the footer directory is staged and replaced with rollback on rename failure. Config, auth and terminal settings are untouched. The latest three state backups are retained under standalone. `restore` checks the stock hash and refuses an unexpected active release. `sync-footer` uses the same footer replacement and removes its previous directory after success. Retired executables and staging/previous directories are cleaned up best effort; locked leftovers are silently skipped and retried on later operations.
+`install` copies the stock package once into the stable sibling release `<version>-agent-kit`, replaces `bin/codex.exe`, and copies `statusline.js`, `package.json`, `LICENSE`, and `src/` into `codex-resources/agent-statusline`. Executable and footer copies are hash-verified. With existing state, reinstall updates the same `customTarget` in place without copying the package again. A locked executable is renamed to `.retired-*` before copying; the footer directory is staged and replaced with rollback on rename failure. Config, auth and terminal settings are untouched. The latest three state backups are retained under standalone. `install` requires the manifest version and checks the voice host with `--build-commit` against the manifest commit before changing anything. A mismatch prints the official PowerShell installer command with the required `-Release`. `restore` uses `stockTarget` and its hash from state regardless of the current manifest version, and refuses an unexpected active release. `sync-footer` uses the same footer replacement and removes its previous directory after success. Retired executables and staging/previous directories are cleaned up best effort; locked leftovers are silently skipped and retried on later operations.
 
 Without state, a release containing `codex-resources/agent-statusline` or lacking an official version/target-triple name is treated as custom. Migration first searches the targets of `current.before-*` junctions, then `releases/<version>-x86_64-pc-windows-msvc`. A package with our footer is never accepted as stock. If no stock release is found, installation stops with a clear error. The old manual custom release is not deleted: installation prints its path and a reminder to remove it manually only after checking the new installation and closing old processes.
+
+For a version upgrade, run `npm run codex:restore`, then `codex update` to the manifest version, build the matching patched CLI and run `npm run codex:install`. An older state triggers a fresh copy of the new official package into `<manifest.version>-agent-kit` and new rollback paths. The active release may be the new official package or either recorded old release. The old custom directory is retained and its path is printed; subsequent restore returns to the new official release. Run `codex update` from PowerShell or cmd: Git Bash puts GNU tar first in PATH, causing the internal install.ps1 to fail.
 
 Junction activation uses two renames with rollback on errors (as in the former PowerShell installer); there is a brief interval without `current`. A process/power failure between these renames requires recovery from the `current.before-*` junction, which is cleaned up only after successful activation and saving state. Reinstalling an already active custom release does not switch the junction.
 
@@ -70,7 +72,7 @@ For a disposable install, use `npm run codex:install -- --codex-home <temporary-
 
 The manifest is the source of feature IDs, English/Russian descriptions, ordering and attribution. Independent features share no edited files; interaction modes deliberately depends on statusline for its payload and refresh state.
 
-| ID / patch file in `codex-0.164.0/` | Dependencies | Description / Описание |
+| ID / patch file in `codex/` | Dependencies | Description / Описание |
 |---|---|---|
 | `statusline.patch` | — | Native footer / нативный футер, payload, max_lines 32, hidden Plan indicator, config tests |
 | `full-diff.patch` | — | Full compact diffs / полные компактные диффы (booxter) |
@@ -84,10 +86,9 @@ npm test
 node scripts/codex/verify-patches.js
 ```
 
-The explicit verification command needs the cached source archive. It tests all 48 valid feature combinations with `git -c core.longpaths=true apply --check` and application in a disposable clean tree, then checks the full selection against `tree-sha256.json`, recorded from the current combined tree. The initial split also compared all 9454 tree files byte-for-byte with that patch. Node tests cover manifest/dependency errors, paths, mocked requirements and Windows install/reinstall/sync/restore with fake executables and real junctions. They never launch Codex or access a real account.
+The explicit verification command needs the cached source archive. It tests all 48 valid feature combinations with `git -c core.longpaths=true apply --check` and application in a disposable clean tree, then checks the full selection against `tree-sha256.json`, recorded from the fully patched target tree. Use `--record-baseline` to regenerate affected-file hashes after a source/patch port; all combinations and stock-schema checks still run. Node tests cover manifest/dependency errors, paths, mocked requirements and Windows install/reinstall/sync/restore with fake executables and real junctions. They never launch Codex or access a real account.
 
-The release archive contains workspace package versions stamped as `0.0.0` in Cargo.lock; Cargo updates those to `0.164.0`. External dependency versions do not change.
-The upstream Codex test `status_snapshot_shows_auto_review_permissions` expects `v0.0.0` in the header and fails with this build recipe because Cargo stamps `0.164.0`; this version mismatch is unrelated to the patch.
+Cargo may refresh workspace package versions in Cargo.lock to the manifest version. Version-sensitive upstream snapshots may need regeneration for locally stamped builds.
 The prepared local toolchain lives in `.native/toolchain/bin`; it was extracted without installing Rust globally.
 
 ## Faster voice (configuration only)

@@ -1,8 +1,21 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { readZip, extractZip } = require('./archive');
 const { MANIFEST, fileHash, readManifest, locations, run, checkRequirements, under, removeBestEffort } = require('./common');
+
+function checkCargoHomePath({ platform = process.platform, env = process.env, home = os.homedir(), exec = run } = {}) {
+  if (platform !== 'win32') return;
+  const cargoHome = path.win32.resolve(env.CARGO_HOME || path.win32.join(home, '.cargo'));
+  const checkout = path.win32.join(cargoHome, 'git/checkouts/rusty_v8-xxxxxxxxxxxxxxxx/xxxxxxx') + '\\';
+  if (checkout.length + 170 <= 259) return;
+  let enabled = false;
+  try {
+    enabled = /LongPathsEnabled\s+REG_DWORD\s+0x0*1\b/i.test(exec('reg.exe', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem', '/v', 'LongPathsEnabled']));
+  } catch { /* A missing value does not enable long paths. */ }
+  if (!enabled) throw new Error(`CARGO_HOME is too long for the rusty_v8 checkout with Windows long paths disabled: ${cargoHome}. Use a short CARGO_HOME; for example in PowerShell: New-Item -ItemType Junction -Path Z:\\cg -Target '${cargoHome.replaceAll("'", "''")}'; $env:CARGO_HOME = 'Z:\\cg'. Or enable long paths in administrator PowerShell: Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem' -Name LongPathsEnabled -Type DWord -Value 1. No settings or junctions were changed.`);
+}
 
 function cleanupWork(dirs, manifest) {
   const root = path.join(dirs.native, 'work');
@@ -59,6 +72,7 @@ function applyPatches(dirs, check = false) {
 }
 
 async function build(opts) {
+  checkCargoHomePath();
   checkRequirements();
   const { manifest, dirs } = await prepare(opts);
   applyPatches(dirs);
@@ -68,4 +82,4 @@ async function build(opts) {
   fs.writeFileSync(path.join(dirs.native, 'metadata/build.json'), JSON.stringify({ version: manifest.version, commit: manifest.commit, features: dirs.features.map(f => f.id), featureHash: dirs.featureHash, binary: dirs.binary, sha256: fileHash(dirs.binary) }, null, 2));
   console.log(`Built ${dirs.binary}`);
 }
-module.exports = { prepare, applyPatches, build, cleanupWork };
+module.exports = { prepare, applyPatches, build, cleanupWork, checkCargoHomePath };

@@ -1,18 +1,18 @@
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -37,6 +37,7 @@ use codex_history::ResponseItemEnvelope;
- use codex_prompts::ResolvedModelMessages;
+@@ -20,6 +20,7 @@ use codex_features::Feature;
+ use codex_protocol::dynamic_tools::DynamicToolSpec;
  use codex_protocol::error::AgentErrorContext;
  use codex_protocol::intersect_effective_permission_profiles;
 +use codex_protocol::protocol::AskForApproval;
  use codex_protocol::protocol::EnvironmentConfigState;
- use codex_thread_store::PersistContext;
  use codex_utils_path_uri::PathUri;
-@@ -46,6 +47,148 @@ use std::time::Instant;
-
+ use futures::StreamExt;
+@@ -28,6 +29,145 @@ use std::time::Instant;
+ 
  const AGENT_NAMES: &str = include_str!("../../../assets/agent/agent_names.txt");
-
+ 
 +fn read_only_profile(
 +    profile: &codex_protocol::models::PermissionProfile,
 +    roots: &[codex_utils_absolute_path::AbsolutePathBuf],
@@ -47,10 +47,7 @@ diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/
 +    if options.environments.is_none() {
 +        options.environments = options.inherited_environments.as_ref().map(|snapshot| {
 +            snapshot
-+                .inheritable_selections()
-+                .into_iter()
-+                .map(codex_protocol::protocol::TurnEnvironmentSelection::into_request)
-+                .collect()
++                .inheritable_requests()
 +        });
 +    }
 +    let profile = read_only_profile(
@@ -158,7 +155,7 @@ diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/
  /// Initial input delivered after a spawned agent acquires execution capacity.
  ///
  /// V2 communication spawns keep the communication and its context paired so centralized
-@@ -877,6 +1020,9 @@ impl LocalAgentControl {
+@@ -754,6 +897,9 @@ impl LocalAgentControl {
              (None, _) => None,
          };
          let child_create_started_at = Instant::now();
@@ -168,10 +165,10 @@ diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/
          let new_thread = state
              .spawn_child_thread(
                  start_options,
-@@ -891,6 +1037,24 @@ impl LocalAgentControl {
-         let mut pending_spawn =
-             PendingSpawn::new(Arc::clone(&state), new_thread.thread_id, membership);
-
+@@ -772,6 +918,24 @@ impl LocalAgentControl {
+             SpawnOwner::Local,
+         );
+ 
 +        if options.mode == Some(crate::agent::types::RestrictedAgentMode::Plan) {
 +            let mut mode = new_thread.thread.config_snapshot().await.collaboration_mode;
 +            mode.mode = codex_protocol::config_types::ModeKind::Plan;
@@ -190,16 +187,16 @@ diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/
 +                .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
 +        }
 +
-         if let Some(SessionSource::SubAgent(
-             subagent_source @ SubAgentSource::ThreadSpawn {
-                 parent_thread_id, ..
+         if let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+             parent_thread_id, ..
+         })) = notification_source.as_ref()
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -268,6 +268,48 @@ struct AgentControlHarness {
      control: LocalAgentControl,
  }
-
+ 
 +#[tokio::test]
 +async fn spawn_restricted_modes_apply_before_initial_input() {
 +    use crate::agent::types::RestrictedAgentMode;
@@ -249,7 +246,7 @@ diff --git a/codex-rs/core/src/agent/types.rs b/codex-rs/core/src/agent/types.rs
 --- a/codex-rs/core/src/agent/types.rs
 +++ b/codex-rs/core/src/agent/types.rs
 @@ -25,6 +25,7 @@ pub enum SpawnAgentForkMode {
-
+ 
  #[derive(Clone, Debug, Default)]
  pub struct SpawnAgentOptions {
 +    pub mode: Option<RestrictedAgentMode>,
@@ -259,7 +256,7 @@ diff --git a/codex-rs/core/src/agent/types.rs b/codex-rs/core/src/agent/types.rs
 @@ -41,6 +42,59 @@ pub struct SpawnAgentOptions {
      pub cyber_access_program: Option<CyberAccessProgram>,
  }
-
+ 
 +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 +pub enum RestrictedAgentMode {
 +    Plan,
@@ -319,7 +316,7 @@ diff --git a/codex-rs/core/src/agent/types.rs b/codex-rs/core/src/agent/types.rs
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -4577,6 +4577,14 @@ impl Session {
+@@ -4729,6 +4729,14 @@ impl Session {
              developer_sections
                  .push(DeveloperInstructions::new(developer_instructions).render_fragment());
          }
@@ -337,7 +334,7 @@ diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
 diff --git a/codex-rs/core/src/thread_spawn.rs b/codex-rs/core/src/thread_spawn.rs
 --- a/codex-rs/core/src/thread_spawn.rs
 +++ b/codex-rs/core/src/thread_spawn.rs
-@@ -96,11 +96,12 @@ pub(crate) async fn spawn(
+@@ -153,11 +153,12 @@ pub(crate) async fn prepare(
      .await
      .map_err(ThreadSpawnError::Preparation)?;
      let config = prepared.config;
@@ -351,8 +348,8 @@ diff --git a/codex-rs/core/src/thread_spawn.rs b/codex-rs/core/src/thread_spawn.
          .map_err(ThreadSpawnError::Preparation)?;
      let spawn_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
          parent_thread_id: session.thread_id,
-@@ -146,6 +147,7 @@ pub(crate) async fn spawn(
-             },
+@@ -196,6 +197,7 @@ pub(crate) async fn prepare(
+             config,
              source: spawn_source,
              options: SpawnAgentOptions {
 +                mode,

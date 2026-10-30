@@ -1,0 +1,15 @@
+﻿<job><script language="JScript"><![CDATA[
+// Windows Script Host exposes the local process tree without starting PowerShell.
+var service = GetObject('winmgmts:{impersonationLevel=impersonate}!\\\\.\\root\\cimv2');
+var pid = Number(WScript.Arguments(0));
+function quote(value) { return '"' + String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t') + '"'; }
+var rows = [];
+for (var n = 0; n < 16 && pid; n++) {
+  var entries = new Enumerator(service.ExecQuery('SELECT ProcessId,ParentProcessId,CreationDate,Name,CommandLine FROM Win32_Process WHERE ProcessId=' + pid));
+  if (entries.atEnd()) break;
+  var p = entries.item();
+  rows.push('{"pid":' + p.ProcessId + ',"start":' + quote(p.CreationDate) + ',"name":' + quote(p.Name) + ',"command":' + quote(p.CommandLine) + '}');
+  pid = Number(p.ParentProcessId);
+}
+WScript.Echo('[' + rows.join(',') + ']');
+]]></script></job>

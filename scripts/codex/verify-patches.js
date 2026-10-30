@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { readZip, extractZip } = require('./archive');
-const { ROOT, MANIFEST, readManifest, selectFeatures, locations, fileHash, run, under } = require('./common');
+const { MANIFEST, readManifest, selectFeatures, locations, fileHash, under } = require('./common');
 const { applyPatches } = require('./build');
 
 // Explicitly opt in: this extracts sources and runs git apply, never a Rust build.
@@ -41,23 +41,16 @@ function verify() {
     }
     reset();
     applyPatches({ work, features: manifest.features });
-    // Compare every archive file, plus newly added files, with the pre-split tree.
+    // Compare every archive file, plus newly added files, with the recorded patched tree.
     const expectedHashes = Object.fromEntries([...new Set([...originals.keys(), ...files])].map(file => [file, fileHash(path.join(work, file))]));
-    const baseline = path.join(ROOT, 'patches/codex-0.164.0/tree-sha256.json');
+    const baseline = path.join(path.dirname(MANIFEST), 'tree-sha256.json');
     if (process.argv.includes('--record-baseline')) {
-      const combined = process.argv[process.argv.indexOf('--record-baseline') + 1];
-      if (!combined) throw new Error('Expected old combined patch path');
-      reset();
-      const env = { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(work) };
-      run('git', ['-c', 'core.longpaths=true', 'apply', '--check', path.resolve(combined)], { cwd: work, env });
-      run('git', ['-c', 'core.longpaths=true', 'apply', path.resolve(combined)], { cwd: work, env });
-      for (const [file, hash] of Object.entries(expectedHashes)) assert.equal(fileHash(path.join(work, file)), hash, file);
       // Persist only affected files; all other archive entries were also checked above.
       fs.writeFileSync(baseline, JSON.stringify(Object.fromEntries(files.sort().map(file => [file, expectedHashes[file]])), null, 2) + '\n');
     } else {
       for (const [file, hash] of Object.entries(JSON.parse(fs.readFileSync(baseline, 'utf8')))) assert.equal(expectedHashes[file], hash, file);
     }
-    console.log(`${count} valid feature combinations: git apply --check + apply passed; full tree equals combined-patch baseline (${Object.keys(expectedHashes).length} files).`);
+    console.log(`${count} valid feature combinations: git apply --check + apply passed; patched tree matches recorded baseline (${Object.keys(expectedHashes).length} files).`);
   } finally { under(work, folder); fs.rmSync(work, { recursive: true, force: true }); }
 }
 if (require.main === module) { try { verify(); } catch (error) { console.error(error); process.exitCode = 1; } }

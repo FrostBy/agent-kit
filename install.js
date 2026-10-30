@@ -11,6 +11,8 @@ const VOICE_KEY = 'experimental_realtime_ws_backend_prompt';
 function items(platform = process.platform, manifest = readManifest()) {
   return [
     { id: 'claude', label: 'Claude statusline', available: true, dependencies: [] },
+    { id: 'broker', label: 'Agent broker', available: true, optional: true, dependencies: [] },
+    { id: 'sync', label: 'Session sync (experimental)', available: true, optional: true, dependencies: [] },
     ...manifest.features.map(f => ({ id: f.id, label: `Codex: ${f.description.en}`, available: platform === 'win32', dependencies: f.dependencies })),
     { id: 'voice', label: 'Faster Codex voice (booxter)', available: platform === 'win32', dependencies: [] },
   ];
@@ -36,7 +38,7 @@ function resolveSelection(opts, platform = process.platform, manifest = readMani
   for (const id of [...(opts.only || []), ...(opts.skip || [])]) {
     if (!choices.some(item => item.id === id)) throw new Error(`Unknown item: ${id}. Use --list.`);
   }
-  const requested = (opts.only || choices.filter(item => item.available).map(item => item.id)).filter(id => !opts.skip?.includes(id));
+  const requested = (opts.only || choices.filter(item => item.available && !item.optional).map(item => item.id)).filter(id => !opts.skip?.includes(id));
   for (const id of requested) if (!choices.find(item => item.id === id).available) throw new Error(`${id}: TODO — Codex installation is currently Windows-only`);
   const features = selectFeatures(manifest, requested.filter(id => manifest.features.some(f => f.id === id)).join(',') || 'none');
   for (const feature of features) if (opts.skip?.includes(feature.id)) throw new Error(`${feature.id} is required by the selected features; remove it from --skip`);
@@ -172,6 +174,8 @@ async function main(args = process.argv.slice(2), {
     exec(process.execPath, [path.join(ROOT, 'scripts/codex/cli.js'), 'build', '--features', selection.features.map(f => f.id).join(',')], childOpts);
     exec(process.execPath, [path.join(ROOT, 'scripts/codex/cli.js'), 'install'], childOpts);
   }
+  if (selection.selected.some(item => item.id === 'broker')) log(`Agent broker: node "${path.join(ROOT, 'scripts/agents/broker.js')}" --agent codex|kimi --name NAME --state DIR --prompt FILE`);
+  if (selection.selected.some(item => item.id === 'sync')) require('./src/sync/install').configure({ env, log });
   if (selection.selected.some(item => item.id === 'voice')) await configureVoice({ env, yes: opts.yes, confirm: tty ? ask : undefined, log });
 }
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });

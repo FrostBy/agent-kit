@@ -2,9 +2,9 @@
   "name": "agent-kit",
   "version": "0.4.4",
   "description": "Agent kit for Claude Code and Codex CLI: one dependency-free statusline for both, Codex patches and faster Codex voice.",
-  "bin": { "agent-kit": "statusline.js", "agent-statusline": "statusline.js", "claude-statusline-ultimate": "statusline.js" },
+  "bin": { "agent-kit": "statusline.js", "agent-statusline": "statusline.js", "claude-statusline-ultimate": "statusline.js", "agent-broker": "scripts/agents/broker.js", "agent-session-sync": "scripts/agents/sync.js" },
   "main": "statusline.js",
-  "files": ["statusline.js", "src/", "install.js", "install.sh", "install.cmd", "scripts/codex/", "patches/", "templates/", "README.md", "README.RU.md", "LICENSE"],
+  "files": ["statusline.js", "src/", "install.js", "install.sh", "install.cmd", "scripts/codex/", "scripts/agents/", "patches/", "templates/", "README.md", "README.RU.md", "LICENSE"],
   "scripts": {
     "test": "node --test",
     "codex:prepare": "node scripts/codex/cli.js prepare",

@@ -1,7 +1,7 @@
 {
-  "version": "0.164.0",
-  "commit": "6aaac694803004a63c6f393d153c96d22521a6b9",
-  "archiveSha256": "9c26a6a226a7b96bc9086225e5efc8b6db1192bc9929224cb93eb5a868508155",
+  "version": "0.166.0",
+  "commit": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+  "archiveSha256": "73110e6368d72b9662363fdccd7034292d6410dae6dabc053820fd77c2cf8f72",
   "features": [
     { "id": "statusline", "file": "statusline.patch", "description": { "en": "Native command footer, payload, 32-line ceiling and hidden stock Plan indicator", "ru": "Нативный футер, payload, потолок 32 строки и скрытие штатного Plan-индикатора" }, "dependencies": [], "attribution": "GordonBeeming/codex-statusline v5 (Apache-2.0); agent-statusline port and extensions" },
     { "id": "full-diff", "file": "full-diff.patch", "description": { "en": "Full edit diffs in compact mode", "ru": "Полные диффы правок в компактном режиме" }, "dependencies": [], "attribution": "booxter/nix: codex-show-full-patches.patch" },
