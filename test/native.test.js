@@ -25,6 +25,7 @@ const umbrella = (count) => ({ mode: 'umbrella', root, repos: Array.from({ lengt
 
 test('native mode renders once at the end with a spacer and separately colored hint', async () => {
   const labels = {
+    default: 'default mode (shift+tab to cycle)',
     auto: '⏵⏵ auto mode on (shift+tab to cycle)',
     plan: '⏸\uFE0E plan mode on (shift+tab to cycle)',
     'read-only': 'read-only mode',
@@ -113,7 +114,7 @@ test('native content limit excludes mode, spacer and gap and respects terminal h
   const lines = Array.from({ length: 40 }, () => ['model']);
   for (const mode of ['auto', 'plan', 'default']) {
     const input = { ...snapshot(), mode };
-    const suffix = mode === 'default' ? [] : ['\u2800', `${mode === 'auto' ? '⏵⏵' : '⏸\uFE0E'} ${mode} mode on (shift+tab to cycle)`];
+    const suffix = mode === 'default' ? ['\u2800', 'default mode (shift+tab to cycle)'] : ['\u2800', `${mode === 'auto' ? '⏵⏵' : '⏸\uFE0E'} ${mode} mode on (shift+tab to cycle)`];
     const render = (options = {}) => renderNative(input, cfg({ lines, ...options }), 0, { git: () => null });
     assert.deepEqual(await render(), [...Array(4).fill('GPT-6.1'), ...suffix, '\u2800']);
     assert.deepEqual(await render({ maxLines: 6, gapAfter: false }), [...Array(6).fill('GPT-6.1'), ...suffix]);
@@ -225,4 +226,18 @@ test('native CLI entry accepts JSON and rejects malformed input', () => {
   assert.match(result.stdout, /GPT-6.1/);
   assert.doesNotMatch(result.stdout, /DEMO|agent-statusline · Codex/);
   assert.notEqual(run('{broken').status, 0);
+});
+
+test('native exec detail keeps the executable and argument prefix instead of its path', async () => {
+  for (const [command, expected] of [
+    [String.raw`"C:\\Users\\frost\\AppData\\Local\\Microsoft\\WindowsApps\\powershell.exe" Get-ChildItem -Recurse -Force -Hidden`, 'powershell.exe Get-ChildItem -Recurse -\u2026'],
+    ['/usr/bin/node --test', 'node --test'],
+    [`'/opt/my tools/node' --test`, 'node --test'],
+    ['npm test', 'npm test'],
+  ]) {
+    const input = snapshot();
+    input.activity.tool = { name: 'exec', detail: command };
+    const rows = await renderNative(input, cfg({ lines: [['activity']], gapAfter: false }), 0, { git: () => null });
+    assert.equal(rows[0], '\u2699  exec ' + expected);
+  }
 });

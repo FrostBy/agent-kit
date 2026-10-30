@@ -3,6 +3,17 @@ const { render, renderLines } = require('./render');
 const { byId, optsFor } = require('./widgets');
 const { detectLang } = require('./i18n');
 const { stripVTControlCharacters } = require('util');
+const path = require('node:path');
+
+function execDetail(command) {
+  const text = command.trim();
+  const match = /^(?:"([^"\n]+)"|'([^'\n]+)'|(\S+))\s*([\s\S]*)$/.exec(text);
+  if (!match) return text;
+  const executable = path.win32.basename(match[1] || match[2] || match[3]);
+  const args = match[4].replace(/[\r\n\t]+/g, ' ').trim();
+  const detail = executable + (args ? ' ' + args : '');
+  return detail.length > 40 ? detail.slice(0, 39) + '\u2026' : detail;
+}
 
 async function renderNative(snapshot, config, now = Date.now(), sources = {}) {
   if (snapshot?.schema_version !== 1 || typeof snapshot.cwd !== 'string' || !snapshot.model?.id) {
@@ -18,7 +29,7 @@ async function renderNative(snapshot, config, now = Date.now(), sources = {}) {
   const input = {
     ...snapshot,
     harness: 'codex',
-    mode: ['default', 'auto', 'plan', 'read-only'].includes(snapshot.mode) ? snapshot.mode : 'default',
+    mode: ['default', 'auto', 'plan', 'read-only'].includes(snapshot.mode) ? snapshot.mode : null,
     context_window: cw.context_window_size > 0 ? cw : null,
     workspace: { project_dir: snapshot.project_dir || snapshot.cwd, current_dir: snapshot.cwd },
     quota_windows: windows,
@@ -29,6 +40,8 @@ async function renderNative(snapshot, config, now = Date.now(), sources = {}) {
     : { waiting_approval: 'awaits approval', waiting_input: 'awaits reply', failed: 'failed' };
   const activity = snapshot.activity ? {
     ...snapshot.activity,
+    tool: snapshot.activity.tool?.name === 'exec' && typeof snapshot.activity.tool.detail === 'string'
+      ? { ...snapshot.activity.tool, detail: execDetail(snapshot.activity.tool.detail) } : snapshot.activity.tool,
     agent_attention: (Array.isArray(snapshot.activity.agent_attention) ? snapshot.activity.agent_attention : [])
       .filter((alert) => alert && typeof alert.name === 'string' && alert.name.trim() && Object.hasOwn(labels, alert.status))
       .map((alert) => ({ ...alert, label: labels[alert.status] })),

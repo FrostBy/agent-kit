@@ -3681,8 +3681,8 @@ new file mode 100644
 +        self.status_line_command.active_tools.push((
 +            item.id().to_string(),
 +            ToolPayload {
++                detail: if name == "exec" { detail } else { detail.chars().take(40).collect() },
 +                name,
-+                detail: detail.chars().take(40).collect(),
 +            },
 +        ));
 +    }
@@ -4007,7 +4007,7 @@ diff --git a/codex-rs/tui/src/chatwidget/status_line_command_tests.rs b/codex-rs
 new file mode 100644
 --- /dev/null
 +++ b/codex-rs/tui/src/chatwidget/status_line_command_tests.rs
-@@ -0,0 +1,326 @@
+@@ -0,0 +1,333 @@
 +use super::*;
 +use pretty_assertions::assert_eq;
 +
@@ -4146,7 +4146,14 @@ new file mode 100644
 +    );
 +    chat.observe_status_line_item(&item, false);
 +    assert!(chat.status_line_command.active_tools.is_empty());
-+    chat.observe_status_line_item(&item, true);
++    let command = r#""C:\Users\frost\AppData\Local\Microsoft\WindowsApps\powershell.exe" Get-ChildItem -Recurse"#;
++    let exec: ThreadItem = serde_json::from_value(serde_json::json!({
++        "type": "commandExecution", "id": "exec", "command": command,
++        "cwd": chat.config.cwd.to_path_buf(), "status": "inProgress", "commandActions": []
++    })).unwrap();
++    chat.observe_status_line_item(&exec, true);
++    let payload: serde_json::Value = serde_json::from_str(&chat.status_line_command_payload()).unwrap();
++    assert_eq!(payload["activity"]["tool"]["detail"], command);
 +    chat.finalize_turn();
 +    assert!(chat.status_line_command.active_tools.is_empty());
 +}

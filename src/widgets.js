@@ -72,7 +72,7 @@ def({ id: 'effort', group: 'session', desc: { en: 'Effort level', ru: 'Уров�
 def({ id: 'thinking', group: 'session', desc: { en: 'Extended thinking enabled', ru: 'Extended thinking включён' }, render: (d, o, t) => d.in.thinking?.enabled && t.paint('muted', `${t.iconSp('thinking')}think`) });
 def({ id: 'fast', group: 'session', desc: 'Fast mode', render: (d, o, t) => d.in.fast_mode && t.paint('warn', `${t.iconSp('fast')}fast`) });
 def({ id: 'mode', group: 'session', desc: { en: 'Codex mode (Shift+Tab to cycle)', ru: 'Режим Codex (Shift+Tab для переключения)' }, render: (d, o, t) => {
-  const text = { auto: '⏵⏵ auto mode on', plan: '⏸\uFE0E plan mode on', 'read-only': 'read-only mode' }[d.in.mode];
+  const text = { default: 'default mode', auto: '⏵⏵ auto mode on', plan: '⏸\uFE0E plan mode on', 'read-only': 'read-only mode' }[d.in.mode];
   return text && t.paint({ auto: 'warn', plan: 'info' }[d.in.mode] || 'muted', text)
     + (d.in.mode === 'read-only' ? '' : t.paint('muted', ' (shift+tab to cycle)'));
 } });
