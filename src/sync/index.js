@@ -8,10 +8,16 @@ const { promisify } = require('node:util');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { slug, activated } = require('./activation');
 const context = require('./context');
+const names = require('./names');
+const { humanClaude, userText, cleanText } = require('./messages');
+const { claudeShell, codexShells, summary: shellSummary } = require('./user-shell');
+const { claudeCalls } = require('./tool-mapping');
+const { toolSummary } = require('./tool-summary');
 const delivery = require('./delivery');
 const { acquire } = require('./lease');
 const processCache = require('./process-cache');
 const { version } = require('./versions');
+const { createCodexMirror } = require('./codex-mirror');
 const MARK = '[session-sync:v2:';
 const digest = x => createHash('sha256').update(x).digest('hex');
 const other = kind => kind === 'claude' ? 'codex' : 'claude';
@@ -34,7 +40,7 @@ async function withConfig(config, fn) {
     if (!config[key] || !path.isAbsolute(config[key])) throw Error(`Real config requires absolute ${key}`);
   }
   if (!same(config.codexSessionsDir, path.join(config.codexHome, 'sessions'))) throw Error('Invalid Codex sessions directory');
-  const roots = await Promise.all([config.stateDir, config.claudeProjectsDir, config.codexSessionsDir].map(canonical));
+  const roots = await Promise.all([config.stateDir, config.claudeProjectsDir, config.codexSessionsDir, path.join(config.codexHome, 'archived_sessions')].map(canonical));
   const index = await canonical(path.join(config.codexHome, 'session_index.jsonl'));
   return scope.run({ roots, index }, fn);
 }
@@ -93,9 +99,22 @@ function extract(kind, records, sessionId, context = {}) {
   const result = [], calls = new Map(context.calls || []);
   const push = (id, role, text, compact = false) => {
     if (!text || (!compact && text.includes(MARK))) return;
-    result.push({ key: digest(`${kind}:${sessionId}:${id}:${text}`), origin: kind, role, text, ...(compact ? { compact: true } : {}) });
+    result.push({ key: digest(`${kind}:${sessionId}:${id}:${text}`), origin: kind, role, text, ...(context.model ? { model: context.model } : {}), ...(compact ? { compact: true } : {}) });
+  };
+  const pushTool = (id, text, name, input, output, details = {}) => {
+    const before = result.length; push(id, 'assistant', text);
+    if (result.length === before) return;
+    if (typeof input === 'string') { try { input = JSON.parse(input); } catch { input = { input }; } }
+    result.at(-1).tool = { name: String(name).replace(/[^a-zA-Z0-9_-]/g, '_'), input: input && typeof input === 'object' ? input : { input }, output, ...details };
+  };
+  const pushShell = (id, shell) => {
+    const before = result.length; push(`user-shell:${id}`, 'user', shellSummary(shell));
+    if (result.length > before) result.at(-1).shell = shell;
   };
   for (const [localIndex, r] of records.entries()) {
+    if (kind === 'claude' && r.session_sync_key) continue;
+    if (r.message?.model) context.model = r.message.model;
+    if ((r.type === 'turn_context' || r.type === 'session_meta') && r.payload?.model) context.model = r.payload.model;
     const index = (context.ordinal || 0) + localIndex;
     const compact = kind === 'codex' && (r.type === 'compacted' || (r.type === 'response_item' && r.payload?.type === 'compacted'));
     if (compact) {
@@ -103,9 +122,10 @@ function extract(kind, records, sessionId, context = {}) {
       const history = p.replacement_history;
       if (!Array.isArray(history)) throw Error('Compaction missing replacement_history');
       const visible = history.filter(item => item.type === 'message' && ['user', 'assistant'].includes(item.role))
-        .map(item => ({ role: item.role, text: textBlocks(item.content) })).filter(item => item.text);
-      const summary = typeof p.message === 'string' && p.message ? p.message : visible.shift()?.text;
+        .map(item => ({ role: item.role, text: item.role === 'user' ? userText('codex', {}, item) : textBlocks(item.content) })).filter(item => item.text);
+      const summary = typeof p.message === 'string' && p.message ? cleanText('codex', p.message) : visible.shift()?.text;
       calls.clear();
+      delete context.userShell;
       const compactId = p.id ?? index;
       push(compactId, 'user', summary || '[Compacted context: no visible summary.]', true);
       for (const [n, item] of visible.entries()) if (item.text !== summary) push(`${compactId}:replacement:${n}`, item.role, item.text);
@@ -113,39 +133,61 @@ function extract(kind, records, sessionId, context = {}) {
     }
     if (kind === 'claude') {
       if (!r.isSidechain && r.type === 'system' && r.subtype === 'compact_boundary') {
-        calls.clear(); push(r.uuid ?? index, 'user', '[Compacted context: summary pending.]', true); continue;
+        calls.clear(); delete context.userShell; push(r.uuid ?? index, 'user', '[Compacted context: summary pending.]', true); continue;
       }
       if (!r.isSidechain && r.isCompactSummary) {
-        calls.clear(); push(r.uuid ?? index, 'user', textBlocks(r.message?.content), true); continue;
+        calls.clear(); delete context.userShell; push(r.uuid ?? index, 'user', cleanText('claude', textBlocks(r.message?.content)), true); continue;
       }
       if (r.isSidechain || r.isMeta || r.isCompactSummary || r.type === 'attachment' || !r.message) continue;
       const p = r.message;
       if (!['user', 'assistant'].includes(p.role)) continue;
+      if (p.role === 'user' && !humanClaude(r)) continue;
+      if (p.role === 'user') {
+        const shell = claudeShell(r, textBlocks(p.content), context, index);
+        if (shell?.handled) { if (shell.shell) pushShell(shell.id, shell.shell); continue; }
+        if (userText('claude', r, p)) delete context.userShell;
+      }
       const blocks = Array.isArray(p.content) ? p.content : [];
-      push(r.uuid ?? index, p.role, textBlocks(p.content));
+      push(r.uuid ?? index, p.role, p.role === 'user' ? userText('claude', r, p) : textBlocks(p.content));
       for (const [n, b] of blocks.entries()) {
-        if (b.type === 'tool_use') calls.set(b.id, { id: `${r.uuid}:${n}`, name: b.name, input: b.input });
+        if (b.type === 'tool_use') calls.set(b.id, { id: `${r.uuid}:${n}`, name: b.name, input: b.input, timestamp: r.timestamp });
         if (b.type === 'tool_result') {
           const call = calls.get(b.tool_use_id);
           if (!call) continue;
-          push(`${call.id}:tool`, 'assistant', `[claude tool ${call.name}]\n${JSON.stringify(call.input)}\nResult:\n${textBlocks(b.content)}`);
+          const info = r.toolUseResult || {}, elapsed = Date.parse(r.timestamp) - Date.parse(call.timestamp);
+          const duration = info.durationMs ?? info.duration_ms ?? (Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined);
+          pushTool(`${call.id}:tool`, `[claude tool ${call.name}]\n${JSON.stringify(call.input)}\nResult:\n${textBlocks(b.content)}`, call.name, call.input, textBlocks(b.content), {
+            isError: b.is_error === true, ...(Number.isInteger(info.exitCode ?? info.exit_code) ? { exitCode: info.exitCode ?? info.exit_code } : {}),
+            ...(Number.isFinite(duration) ? { durationMs: duration } : {}),
+          });
           calls.delete(b.tool_use_id);
         }
       }
     } else {
       if (r.type !== 'response_item') continue;
       const p = r.payload, id = p.id ?? r.ordinal ?? index;
+      if (['web_search_call', 'image_generation_call'].includes(p.type) && p.status === 'completed') {
+        const name = p.type === 'web_search_call' ? 'web_search' : 'image_generation_call';
+        pushTool(`${id}:tool`, `[codex tool ${name}]\nCompleted operation.`, name, { action: p.action }, 'Completed operation.');
+        continue;
+      }
       if (p.type === 'message' && ['user', 'assistant'].includes(p.role)) {
-        const meta = p.internal_chat_message_metadata_passthrough;
-        if (meta?.content_item_metadata?.some(m => m.provenance?.hook || m.provenance?.type === 'agents_md')) continue;
-        push(id, p.role, textBlocks(p.content));
+        if (p.role === 'user') for (const { index, shell } of codexShells(p)) pushShell(`${id}:${index}`, shell);
+        push(id, p.role, p.role === 'user' ? userText('codex', r, p) : textBlocks(p.content));
       }
       if (['function_call', 'custom_tool_call', 'local_shell_call'].includes(p.type)) calls.set(p.call_id ?? p.id, { id, payload: p });
       if (['function_call_output', 'custom_tool_call_output', 'local_shell_call_output'].includes(p.type)) {
         const call = calls.get(p.call_id);
         if (!call) continue;
         const c = call.payload;
-        push(`${call.id}:tool`, 'assistant', `[codex tool ${c.name ?? c.type}]\n${c.arguments ?? c.input ?? JSON.stringify(c.action)}\nResult:\n${typeof p.output === 'string' ? p.output : JSON.stringify(p.output)}`);
+        const output = typeof p.output === 'string' ? p.output : JSON.stringify(p.output);
+        const exit = output?.match(/Process exited with code (-?\d+)/), duration = output?.match(/Wall time:\s*([\d.]+) seconds/);
+        const failedPatch = c.name === 'apply_patch' && /^(?:Error:|Failed to|apply_patch.*failed|Invalid patch)/i.test(output || '');
+        pushTool(`${call.id}:tool`, `[codex tool ${c.name ?? c.type}]\n${c.arguments ?? c.input ?? JSON.stringify(c.action)}\nResult:\n${output}`, c.name ?? c.type, c.arguments ?? c.input ?? c.action, output, {
+          ...(exit ? { exitCode: Number(exit[1]), isError: Number(exit[1]) !== 0 } : {}),
+          ...(failedPatch || p.is_error || p.output?.success === false ? { isError: true } : {}),
+          ...(duration ? { durationMs: Number(duration[1]) * 1000 } : {}), isIncomplete: /Process running with session ID/i.test(output || ''),
+        });
         calls.delete(p.call_id);
       }
     }
@@ -156,14 +198,39 @@ function extract(kind, records, sessionId, context = {}) {
 
 function encode(kind, endpoint, entries) {
   let parentUuid = null;
+  let importedTodos = [];
   const timestamp = new Date().toISOString();
+  if (kind === 'claude') entries = entries.flatMap(entry => {
+    if (entry.shell) return [
+      { ...entry, role: 'user', rawContent: `<bash-input>${entry.shell.command}</bash-input>` },
+      { ...entry, role: 'user', rawContent: `<bash-stdout>${entry.shell.stdout}</bash-stdout><bash-stderr>${entry.shell.stderr}</bash-stderr>` },
+    ];
+    if (!entry.tool) return [entry];
+    const calls = claudeCalls(entry.tool);
+    if (!calls) return [{ ...entry, role: 'assistant', text: toolSummary(entry.tool) }];
+    return calls.flatMap((call, n) => {
+      const id = `toolu_sync_${entry.key.slice(0, 24)}_${n}`;
+      const output = (entry.tool.output || '').split(/(?:^|\n)Final output:\r?\n/).at(-1);
+      const toolUseResult = call.name === 'TodoWrite' ? { oldTodos: importedTodos, newTodos: call.input.todos }
+        : call.name === 'Bash' ? { stdout: entry.tool.isError ? '' : output, stderr: entry.tool.isError ? output : '', interrupted: false, isImage: false }
+        : call.name === 'Edit' ? { filePath: call.input.file_path, oldString: call.input.old_string, newString: call.input.new_string,
+          originalFile: call.input.old_string, userModified: false, replaceAll: false, importedFragment: true,
+          structuredPatch: [{ oldStart: 1, oldLines: call.input.old_string.split('\n').length, newStart: 1, newLines: call.input.new_string.split('\n').length,
+            lines: [...call.input.old_string.split('\n').map(line => '-' + line), ...call.input.new_string.split('\n').map(line => '+' + line)] }] } : undefined;
+      if (call.name === 'TodoWrite') importedTodos = call.input.todos;
+      return [{ ...entry, role: 'assistant', blocks: [{ type: 'tool_use', id, name: call.name, input: call.input }] },
+        { ...entry, role: 'user', toolUseResult, blocks: [{ type: 'tool_result', tool_use_id: id, content: output,
+          ...(entry.tool.isError ? { is_error: true } : {}) }] }];
+    });
+  });
   return entries.map((e, index) => {
     const text = `${MARK}${e.key}]\n${e.text}`;
     if (kind === 'claude') {
-      const uuid = randomUUID(), row = { type: e.role, uuid, parentUuid, sessionId: endpoint.id, isSidechain: false,
+      const uuid = randomUUID(), row = { type: e.role, uuid, parentUuid, sessionId: endpoint.id, isSidechain: false, session_sync_key: e.key,
         cwd: endpoint.cwd, version: endpoint.version, timestamp,
-        message: e.role === 'user' ? { role: 'user', content: text } : {
-          id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', model: 'session-sync', content: [{ type: 'text', text }],
+        ...(e.toolUseResult ? { toolUseResult: e.toolUseResult } : {}),
+        message: e.role === 'user' ? { role: 'user', content: e.rawContent ?? e.blocks ?? text } : {
+          id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', model: e.model || endpoint.model || 'unknown', content: e.blocks || [{ type: 'text', text }],
           stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 }
         } };
       parentUuid = uuid;
@@ -176,25 +243,28 @@ function encode(kind, endpoint, entries) {
 }
 
 async function createMirror(pair, kind, config, events, options) {
-  const endpoint = pair[kind], title = `[Mirror ${other(kind)} ${pair[other(kind)].id.slice(0, 8)}]`;
+  const endpoint = pair[kind], title = names.title(pair[other(kind)], other(kind));
+  endpoint.cwd = await canonical(config.cwd);
+  if (kind === 'codex') {
+    await createCodexMirror(endpoint, title, events, config, {
+      env: options.env || process.env, connect: options.connectCodex || config.connectCodex,
+      checkpoint: options.checkpoint, confined, deadline: options.deadline, cutoff: pair.archiveSize, compactKey: pair.claude.active?.compactKey ?? null,
+    });
+    endpoint.appliedTitle = title;
+    return;
+  }
   const found = await version(kind, config, pair, options);
   if (typeof found === 'object') { found.cache[kind] = { value: found.value, at: Date.now() }; await write(found.file, JSON.stringify(found.cache)); }
   endpoint.version = typeof found === 'string' ? found : found.value;
-  const timestamp = new Date().toISOString(), seed = encode(kind, endpoint, events);
-  if (kind === 'codex') {
-    const meta = { timestamp, type: 'session_meta', payload: { id: endpoint.id, timestamp, cwd: endpoint.cwd,
-      originator: 'codex-tui', cli_version: endpoint.version, source: 'cli', model_provider: 'openai',
-      session_sync: { mirror: true, pair: pair.id }, base_instructions: { text: 'You are a coding assistant. Continue the conversation supplied by the owner.' } } };
-    await write(endpoint.file, jsonl([meta, ...seed]), true);
-    const index = path.join(config.codexHome, 'session_index.jsonl');
-    const entry = jsonl([{ id: endpoint.id, thread_name: title, updated_at: timestamp }]);
-    {
-      await confined(index);
-      try { await fs.copyFile(index, `${index}.bak-session-sync`, 1); }
-      catch (e) { if (!['ENOENT', 'EEXIST'].includes(e.code)) throw e; }
-      await fs.appendFile(index, entry, 'utf8');
+  endpoint.model = pair[other(kind)].extraction?.model || 'unknown';
+  const seed = encode(kind, endpoint, events);
+  {
+    if (!seed.some(row => row.type === 'user' && (typeof row.message.content === 'string'
+      || row.message.content.some(block => block.type === 'text')))) {
+      const first = encode(kind, endpoint, [{ role: 'user', key: 'seed', text: title }])[0];
+      if (seed.length) seed[0].parentUuid = first.uuid;
+      seed.unshift(first);
     }
-  } else {
     // Give prompt-only origins a completed assistant leaf before exposing them in resume.
     if (!seed.length || seed.at(-1).type !== 'assistant') {
       const tail = encode(kind, endpoint, [{ role: 'assistant', key: 'seed', text: 'Paired conversation imported. Ready to continue.' }])[0];
@@ -207,6 +277,7 @@ async function createMirror(pair, kind, config, events, options) {
     ]), true);
   }
   endpoint.seeded = true;
+  endpoint.appliedTitle = title;
   endpoint.pending = [];
 }
 
@@ -306,6 +377,7 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
   if (!input.session_id || !input.transcript_path || !input.cwd || !same(input.cwd, config.cwd)) return null;
   if (!['SessionStart', 'UserPromptSubmit', 'Stop'].includes(input.hook_event_name)) return null;
   const env = options.env || process.env;
+  options = { ...options, deadline: Date.now() + 27000 };
   // Environment and input exclusions are cheap and must override a cached interactive session.
   if (env.SESSION_SYNC_EXCLUDE || env.SESSION_SYNC_BROKER || input.agent_id || input.isSidechain || input.is_sidechain) return null;
   if (!await activated(config)) return null;
@@ -325,9 +397,10 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
       let pair = mapping ? await readJson(path.join(config.stateDir, `${mapping.id}.json`)) : null;
       if (mapping && !pair) throw Error('Pair state missing');
       const beforePair = pair ? JSON.stringify(pair) : null;
-      if (pair && (!same(pair[kind].file, input.transcript_path) || !same(pair[kind].cwd, config.cwd))) throw Error('Session transcript path changed');
+      if (pair && (pair[kind].file && !same(pair[kind].file, input.transcript_path) || !same(pair[kind].cwd, config.cwd))) throw Error('Session transcript path changed');
       const reads = {};
       async function scan(client, endpoint) {
+        if (endpoint.mirror && !endpoint.seeded) return null;
         const clientRoot = await canonical(client === 'claude' ? config.claudeProjectsDir : config.codexSessionsDir);
         const relative = path.relative(clientRoot, await canonical(endpoint.file));
         if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw Error('Transcript outside configured client directory');
@@ -357,12 +430,15 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
       if (!pair && cliIdentity && decision?.cliIdentity === cliIdentity && same(decision.file, input.transcript_path)) return null;
       reads[kind] = await scan(kind, sourceEndpoint);
       const source = reads[kind]?.records || [];
-      if (!pair && (source.some(r => r.type === 'session-sync-mirror') || sourceEndpoint.meta?.session_sync?.mirror)) throw Error('Orphan mirror: refusing mirror of mirror');
+      const eligibilityRecords = kind === 'codex' ? [{ type: 'session_meta', payload: { ...sourceEndpoint.meta,
+        ...(sourceEndpoint.mirror && sourceEndpoint.managed === 'app-server' && sourceEndpoint.meta?.originator === 'agent-kit-session-sync'
+          ? { source: 'cli', originator: 'codex-tui' } : {}) } }] : source;
+      if (!pair && (source.some(r => r.type === 'session-sync-mirror') || sourceEndpoint.meta?.session_sync?.mirror || sourceEndpoint.meta?.originator === 'agent-kit-session-sync')) throw Error('Orphan mirror: refusing mirror of mirror');
       if (sourceEndpoint.eligible === undefined || (input.hook_event_name === 'SessionStart' && (!cliIdentity || sourceEndpoint.cliIdentity !== cliIdentity))) {
-        sourceEndpoint.eligible = await eligible(kind, input, kind === 'codex' ? [{ type: 'session_meta', payload: sourceEndpoint.meta }] : source, env, options.interactive);
+        sourceEndpoint.eligible = await eligible(kind, input, eligibilityRecords, env, options.interactive);
         sourceEndpoint.cliIdentity = cliIdentity;
       }
-      sourceEndpoint.eligible = await eligible(kind, input, kind === 'codex' ? [{ type: 'session_meta', payload: sourceEndpoint.meta }] : source, env, async () => sourceEndpoint.eligible);
+      sourceEndpoint.eligible = await eligible(kind, input, eligibilityRecords, env, async () => sourceEndpoint.eligible);
       if (!sourceEndpoint.eligible) {
         if (pair && JSON.stringify(pair) !== beforePair) await write(path.join(config.stateDir, `${pair.id}.json`), JSON.stringify(pair));
         else if (!pair) {
@@ -397,6 +473,7 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
           if (endpoint.cursor && pair.archiveSize) for (const event of await rows(journal)) known.add(event.key);
           endpoint.extraction = {}; endpoint.active = null;
         }
+        if (!endpoint.mirror) names.observe(endpoint, client, read.records, read.reset);
         endpoint.extraction ||= {};
         const events = extract(client, read.records, endpoint.id, endpoint.extraction);
         endpoint.cursor = read.cursor;
@@ -420,14 +497,39 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
           endpoint.snapshot = context.snapshot(active, budget); endpoint.pending = []; endpoint.inflight = [];
         }
       }
+      if (!pair.codex.mirror) await names.sourceName(pair.codex, config, { env, connect: options.connectCodex || config.connectCodex, refresh: input.hook_event_name === 'SessionStart' && kind === 'codex' });
       const pairFile = path.join(config.stateDir, `${pair.id}.json`);
       if (!mapping || ['claude', 'codex'].some(client => pair[client].mirror && !pair[client].seeded)) await write(pairFile, JSON.stringify(pair));
       if (!mapping) await write(registryFile, JSON.stringify(registry));
       for (const client of ['claude', 'codex']) if (pair[client].mirror && !pair[client].seeded) {
         const active = pair[other(client)].active;
         const events = active && pair.archiveSize ? await context.materialize(journal, active, budget) : [];
-        await createMirror(pair, client, config, events, options);
-        pair[client].snapshot = null; pair[client].compactAcknowledged = active?.compactKey ?? null;
+        try {
+          await createMirror(pair, client, config, events, { ...options, checkpoint: async () => {
+            const entry = registry.pairs.find(entry => entry.id === pair.id); entry.codex = pair.codex.id;
+            await write(pairFile, JSON.stringify(pair)); await write(registryFile, JSON.stringify(registry));
+          } });
+        } catch (error) {
+          if (client !== 'codex') throw error;
+          const message = `Codex mirror deferred: ${error.message || JSON.stringify(error)}\n`;
+          await fs.appendFile(await confined(path.join(config.stateDir, 'sync.log')), message, { mode: 0o600 });
+          await write(pairFile, JSON.stringify(pair));
+          return null;
+        }
+        pair[client].snapshot = null;
+        pair[client].compactAcknowledged = pair[client].seedState?.compactKey ?? active?.compactKey ?? null;
+        delete pair[client].seedState;
+      }
+      for (const client of ['claude', 'codex']) {
+        const endpoint = pair[client];
+        if (!endpoint.mirror || !endpoint.seeded) continue;
+        const title = names.title(pair[other(client)], other(client));
+        if (endpoint.appliedTitle === title) continue;
+        try {
+          if (client === 'codex') await names.renameCodex(endpoint, title, config, { env, connect: options.connectCodex || config.connectCodex });
+          else await append(endpoint.file, jsonl([{ type: 'custom-title', sessionId: endpoint.id, customTitle: title }]));
+          endpoint.appliedTitle = title;
+        } catch (error) { await fs.appendFile(await confined(path.join(config.stateDir, 'sync.log')), `Mirror rename deferred: ${error.message}\n`, { mode: 0o600 }); }
       }
       let output = null;
       if (input.hook_event_name !== 'Stop') {
@@ -444,9 +546,9 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
 function hookConfigs(script) {
   const events = ['SessionStart', 'UserPromptSubmit', 'Stop'];
   const command = kind => `node "${script.replaceAll('\\', '/')}" hook ${kind}`;
-  const hooks = Object.fromEntries(events.map(event => [event, [{ hooks: [{ type: 'command', command: command('claude'), timeout: 10 }] }]]));
-  const codex = events.map(event => `[[hooks.${event}]]\n[[hooks.${event}.hooks]]\ntype = "command"\ncommand = ${JSON.stringify(command('codex'))}\ntimeout = 10\n${event !== 'Stop' ? 'additionalContextLimit = 16000\n' : ''}`).join('\n');
+  const hooks = Object.fromEntries(events.map(event => [event, [{ hooks: [{ type: 'command', command: command('claude'), timeout: 30 }] }]]));
+  const codex = events.map(event => `[[hooks.${event}]]\n[[hooks.${event}.hooks]]\ntype = "command"\ncommand = ${JSON.stringify(command('codex'))}\ntimeout = 30\n${event !== 'Stop' ? 'additionalContextLimit = 16000\n' : ''}`).join('\n');
   return { claude: { hooks }, codex };
 }
 
-module.exports = { configuration, hook, hookConfigs, incremental, extract, eligible, processInteractive, withConfig, write, rows };
+module.exports = { configuration, hook, hookConfigs, incremental, extract, encode, eligible, processInteractive, withConfig, write, rows };

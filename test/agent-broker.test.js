@@ -14,8 +14,9 @@ function fixture(t, agent) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-kit-broker-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const prompt = path.join(root, 'prompt.md'); fs.writeFileSync(prompt, 'local fixture');
-  const processMock = { env: {}, pid: 123, cwd: () => root, argv: ['node', 'broker.js', '--agent', agent, '--name', 'worker', '--state', root, '--prompt', prompt], exit: code => { throw Error(`exit ${code}`); } };
-  const children = [], requests = [], intervals = [], timers = [];
+  const exits = [];
+  const processMock = Object.assign(new EventEmitter(), { env: {}, pid: 123, cwd: () => root, argv: ['node', 'broker.js', '--agent', agent, '--name', 'worker', '--state', root, '--prompt', prompt], exit: code => { exits.push(code); } });
+  const children = [], requests = [], intervals = [], timers = [], answers = {};
   function spawn(command, args, options) {
     const child = new EventEmitter();
     child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => {};
@@ -28,7 +29,8 @@ function fixture(t, agent) {
       const msg = JSON.parse(payload.toString()); requests.push(msg);
       if (msg.id === undefined) return;
       const result = msg.method === 'thread/start' ? { thread: { id: 'thread-fixture' }, model: 'fixture-model' } : msg.method === 'turn/start' ? { turn: { id: 'turn-fixture' } } : {};
-      queueMicrotask(() => send({ id: msg.id, result }));
+      const response = answers[msg.method] ? answers[msg.method](msg) : { result };
+      queueMicrotask(() => send({ id: msg.id, ...response }));
     } };
     function send(msg) {
       const b = Buffer.from(JSON.stringify(msg));
@@ -37,12 +39,12 @@ function fixture(t, agent) {
     }
     child.send = send; children.push({ command, args, options, child }); return child;
   }
-  const context = { require: name => name === 'node:child_process' ? { spawn } : require(name), process: processMock,
+  const context = { require: name => name === 'node:child_process' ? { spawn } : require(name.startsWith('.') ? path.resolve(__dirname, '../scripts/agents', name) : name), process: processMock,
     console, Buffer, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval() {},
     setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {} };
   const run = () => vm.runInNewContext(source, context, { filename: 'broker.js' });
   const state = () => JSON.parse(fs.readFileSync(path.join(root, 'worker.state.json'), 'utf8'));
-  return { root, run, state, processMock, children, requests, intervals, timers };
+  return { root, run, state, processMock, children, requests, intervals, timers, answers, exits, spawn };
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -81,4 +83,101 @@ test('Kimi broker preserves sessionId and resumes through inbox without real CLI
 test('broker refuses names escaping its state directory before starting a CLI', t => {
   const f = fixture(t, 'codex'); f.processMock.argv[f.processMock.argv.indexOf('--name') + 1] = '../escape';
   assert.throws(f.run, /Invalid agent name/); assert.equal(f.children.length, 0);
+});
+
+test('Codex exits archive on /exit, idle timeout and graceful process signals; failures do not prevent exit', async t => {
+  for (const mode of ['inbox', 'idle', 'signal', 'beforeExit', 'archive-error']) {
+    const f = fixture(t, 'codex');
+    if (mode === 'idle') f.processMock.argv.push('--idle-min', '0.0000001');
+    if (mode === 'archive-error') f.answers['thread/archive'] = () => ({ error: { message: 'archive denied' } });
+    f.run(); await settle();
+    if (mode === 'inbox' || mode === 'archive-error') {
+      fs.writeFileSync(path.join(f.root, 'worker.inbox', 'exit'), '/exit'); f.intervals[0]();
+    } else if (mode === 'idle') {
+      f.children[0].child.send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
+      f.intervals[0]();
+    } else f.processMock.emit(mode === 'signal' ? 'SIGTERM' : 'beforeExit');
+    await settle();
+    const request = f.requests.find(r => r.method === 'thread/archive');
+    assert.deepEqual(request.params, { threadId: 'thread-fixture' });
+    assert.equal(f.state().status, 'done'); assert.equal(f.state().archived, mode !== 'archive-error'); assert.deepEqual(f.exits, [0]);
+    if (mode === 'archive-error') assert.match(fs.readFileSync(path.join(f.root, 'worker.log'), 'utf8'), /archive failed/);
+    assert.equal(broker.agents(f.root, 'codex').length, 0);
+  }
+});
+
+test('saved archived threads unarchive before resume; reconnect detects an externally archived rollout', async t => {
+  const f = fixture(t, 'codex');
+  fs.writeFileSync(path.join(f.root, 'worker.state.json'), JSON.stringify({ agent: 'codex', threadId: 'saved-thread', status: 'done', archived: true, turns: 2 }));
+  f.run(); await settle();
+  assert(f.requests.findIndex(r => r.method === 'thread/unarchive') < f.requests.findIndex(r => r.method === 'thread/resume'));
+  assert(!f.requests.some(r => r.method === 'thread/start')); assert.equal(f.state().threadId, 'saved-thread'); assert.equal(f.state().archived, false);
+  f.answers['thread/read'] = () => ({ result: { thread: { path: '\\\\?\\C:\\home\\codex\\archived_sessions\\rollout-saved-thread.jsonl' } } });
+  f.children[0].child.emit('exit', 1); f.timers.at(-1)(); await settle();
+  const last = f.requests.slice(f.requests.findLastIndex(r => r.method === 'initialize'));
+  assert.deepEqual(last.filter(r => r.method.startsWith('thread/')).map(r => r.method), ['thread/read', 'thread/unarchive', 'thread/resume']);
+});
+
+test('failed/serverOverloaded turns keep the agent idle and accept inbox without archiving', async t => {
+  const f = fixture(t, 'codex'); f.run(); await settle();
+  f.children[0].child.send({ method: 'error', params: { error: { codexErrorInfo: 'serverOverloaded', message: 'busy' } } });
+  f.children[0].child.send({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: 'serverOverloaded' } } } });
+  await settle(); assert.equal(f.state().status, 'idle');
+  assert(!f.requests.some(r => r.method === 'thread/archive')); assert.deepEqual(f.exits, []);
+  fs.writeFileSync(path.join(f.root, 'worker.inbox', 'retry'), 'try again'); f.intervals[0](); await settle();
+  assert.equal(f.requests.filter(r => r.method === 'turn/start').length, 2);
+});
+
+test('archive command is dry-run by default and archives only old idle broker sessions via proxy', async t => {
+  const f = fixture(t, 'codex'), { archiveSessions } = require('../scripts/agents/archive-broker-sessions');
+  const { connectProxy } = require('../src/agents/codex-client');
+  const dir = path.join(f.root, 'sessions'); fs.mkdirSync(dir);
+  const old = new Date(Date.now() - 2 * 3600000);
+  function rollout(id, originator, running = false, recent = false) {
+    const file = path.join(dir, `rollout-${id}.jsonl`), timestamp = (recent ? new Date() : old).toISOString();
+    const rows = [{ timestamp, type: 'session_meta', payload: { id, originator, source: 'vscode' } },
+      { timestamp, type: 'event_msg', payload: { type: running ? 'task_started' : 'task_complete' } }];
+    fs.writeFileSync(file, rows.map(JSON.stringify).join('\n') + '\n'); if (!recent) fs.utimesSync(file, old, old);
+  }
+  rollout('eligible', 'claude-agent-broker'); rollout('running', 'claude-agent-broker', true);
+  rollout('recent', 'claude-agent-broker', false, true); rollout('native', 'codex-tui'); rollout('live', 'claude-agent-broker');
+  fs.writeFileSync(path.join(f.root, 'live.state.json'), JSON.stringify({ agent: 'codex', threadId: 'live', pid: process.pid, status: 'idle' }));
+  const options = { home: f.root, stateDirs: [f.root], log: () => {}, connect: args => connectProxy({ ...args, spawn: f.spawn }) };
+  assert.equal((await archiveSessions(options)).candidates, 1); assert.equal(f.children.length, 0);
+  const result = await archiveSessions({ ...options, apply: true }); assert.equal(result.archived, 1);
+  assert.deepEqual(f.requests.filter(r => r.method === 'thread/archive').map(r => r.params.threadId), ['eligible']);
+  fs.writeFileSync(path.join(f.root, 'archived.state.json'), JSON.stringify({ agent: 'codex', threadId: 'missing-rollout', status: 'idle', archived: true }));
+  assert(!broker.agents(f.root, 'codex').some(agent => agent.id === 'missing-rollout'));
+  assert.doesNotThrow(() => require('../src/sources/codex').load(f.root, Date.now(), f.root, () => true, f.root));
+});
+
+test('isolated stdio transport uses the official dedicated app-server, not the shared proxy', async () => {
+  const { connectProxy } = require('../src/agents/codex-client'), requests = [];
+  const client = connectProxy({ mode: 'stdio', spawn(command, args) {
+    assert.deepEqual(args, ['app-server', '--listen', 'stdio://']);
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough(); child.kill = () => {};
+    child.stdin.on('data', bytes => {
+      const msg = JSON.parse(bytes.toString()); requests.push(msg);
+      if (msg.id !== undefined) queueMicrotask(() => child.stdout.write(JSON.stringify({ id: msg.id, result: { ok: true } }) + '\n'));
+    });
+    return child;
+  } });
+  await client.ready; assert.deepEqual(await client.request('initialize', {}), { ok: true }); client.close();
+  assert.equal(requests[0].method, 'initialize');
+});
+
+test('existing mirror settings are reset through API using an ephemeral user-default probe', async () => {
+  const { resetSettings } = require('../scripts/agents/reset-mirror-settings'), calls = [];
+  const policy = { type: 'workspace-write', writable_roots: [], network_access: false };
+  const connect = () => ({ ready: Promise.resolve(), notify() {}, close() {}, async request(method, params) {
+    calls.push({ method, params });
+    if (method === 'thread/read') return { thread: { cwd: '/demo/project' } };
+    if (method === 'thread/start') return { thread: { id: 'probe' }, sandbox: policy, approvalPolicy: 'on-request' };
+    return {};
+  } });
+  await resetSettings('mirror', { connect, log: () => {} }); assert.equal(calls.length, 0);
+  await resetSettings('mirror', { apply: true, connect, log: () => {} });
+  assert.deepEqual(calls.find(call => call.method === 'thread/start').params, { cwd: '/demo/project', ephemeral: true });
+  assert.deepEqual(calls.find(call => call.method === 'thread/settings/update').params, { threadId: 'mirror', sandboxPolicy: policy, approvalPolicy: 'on-request' });
+  assert(calls.find(call => call.method === 'thread/resume')); assert(calls.find(call => call.method === 'thread/unsubscribe'));
 });

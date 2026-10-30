@@ -38,7 +38,10 @@ async function materialize(journal, active, budget) {
     if (event.key !== ref.key) throw Error('Event archive mismatch');
     const text = clipped(event.text, Math.max(64, limit - 120));
     left -= Buffer.byteLength(text) + 120;
-    return { ...event, text };
+    const tool = event.tool && text !== event.text ? { ...event.tool, input: { truncated: true }, output: clipped(event.tool.output || '', Math.max(64, limit - 200)) } : event.tool;
+    const shell = event.shell && text !== event.text ? { ...event.shell, command: clipped(event.shell.command, Math.max(64, Math.floor(limit / 4))),
+      stdout: clipped(event.shell.stdout, Math.max(64, Math.floor(limit / 2))), stderr: clipped(event.shell.stderr, Math.max(64, Math.floor(limit / 4))) } : event.shell;
+    return { ...event, text, ...(tool ? { tool } : {}), ...(shell ? { shell } : {}) };
   }
   try {
     if (active.summary) events.push(await read(active.summary, Math.min(cost(active.summary), Math.floor(usable / 2))));

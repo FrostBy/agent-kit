@@ -28,7 +28,7 @@ function agents(scratchpad, agent) {
     try {
       const state = readJson(filename);
       const id = agent === 'codex' ? state?.threadId : state?.sessionId;
-      if (state?.agent !== agent || ['done', 'error'].includes(state.status)
+      if (state?.agent !== agent || state.archived === true || ['done', 'error'].includes(state.status)
         || typeof id !== 'string' || !/^[\w-]+$/.test(id)) continue;
       const updatedAt = fs.statSync(filename).mtimeMs;
       found.push({ id, name: path.basename(filename).slice(0, -11), model: typeof state.model === 'string' ? state.model : '', updatedAt });

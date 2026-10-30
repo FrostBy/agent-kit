@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const TIMEOUT = 10000;
+const TIMEOUT = 30000;
 const absent = error => error.code === 'ENOENT';
 function acquire(root, now = Date.now()) {
   fs.mkdirSync(root, { recursive: true });

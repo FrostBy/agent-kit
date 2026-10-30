@@ -8,7 +8,8 @@
 // через `codex app-server proxy`, config.toml не меняется, настройки идут параметрами потока.
 'use strict';
 const { spawn } = require('node:child_process');
-const { randomBytes } = require('node:crypto');
+const { connectProxy } = require('../../src/agents/codex-client');
+const { plain } = require('../../src/agents/codex-path');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -44,7 +45,16 @@ if (!Number.isFinite(opt.idleMin) || opt.idleMin <= 0) throw Error('Invalid --id
 const base = path.join(path.resolve(opt.state), opt.name);
 const inbox = `${base}.inbox`;
 fs.mkdirSync(inbox, { recursive: true });
-const state = { agent: opt.agent, status: 'starting', turns: 0, pid: process.pid };
+let previous;
+if (opt.agent === 'codex') {
+  try { previous = JSON.parse(fs.readFileSync(`${base}.state.json`, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+if (previous?.agent === 'codex' && previous.threadId && !/^[\w-]+$/.test(previous.threadId)) throw Error('Invalid saved thread ID');
+if (previous?.pid && previous.pid !== process.pid && !['done', 'error'].includes(previous.status)) {
+  let live = true; try { process.kill(previous.pid, 0); } catch (error) { if (error.code === 'ESRCH') live = false; }
+  if (live) throw Error('Broker state is owned by a live process');
+}
+const state = { ...(previous?.agent === opt.agent ? previous : {}), agent: opt.agent, status: 'starting', turns: previous?.agent === opt.agent ? previous.turns || 0 : 0, pid: process.pid };
 const save = () => fs.writeFileSync(`${base}.state.json`, JSON.stringify(state, null, 2));
 const log = (s) => fs.appendFileSync(`${base}.log`, `[${new Date().toISOString()}] ${s}\n`);
 const finishTurn = (text) => {
@@ -63,7 +73,9 @@ const takeInbox = () => {
     return text.trim();
   });
 };
+let shutdownCodex;
 const done = (status, code = 0) => {
+  if (shutdownCodex) return shutdownCodex(status, code);
   state.status = status;
   save();
   log(`exit ${status}`);
@@ -80,8 +92,9 @@ function runCodex() {
   // одним автоматическим сообщением. running - только пока ход жив.
   const RETRY_MS = [2000, 5000, 10000, 20000, 30000, 60000, 60000, 120000];
   let conn = null;
-  let threadId = null;
-  let turnId = null;
+  let threadId = state.threadId || null;
+  let turnId = state.turnId || null;
+  let closing = false;
   let lastText = null;
   let attempt = 0;
   const resumedTurns = new Set();
@@ -109,79 +122,19 @@ function runCodex() {
   };
 
   function connect() {
-    const proc = spawn(process.env.AGENT_BROKER_CODEX || 'codex', ['app-server', 'proxy'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    const c = { proc, alive: true, pending: new Map(), nextId: 1, ticker: null };
+    if (closing) return;
+    const c = connectProxy({ env: process.env, spawn, log, timeout: REQUEST_MS,
+      onNotification: msg => onMessage(c, msg),
+      onDisconnect: why => {
+        clearInterval(c.ticker); log(`connection lost: ${why}`);
+        if (!closing) reconnect();
+      } });
     conn = c;
-    let handshaken = false;
-    let raw = Buffer.alloc(0);
-    let fragments = [];
-    c.lost = (why) => {
-      if (!c.alive) return;
-      c.alive = false;
-      clearInterval(c.ticker);
-      log(`connection lost: ${why}`);
-      for (const p of c.pending.values()) p.reject({ reason: 'disconnected', message: why });
-      c.pending.clear();
-      try { proc.kill(); } catch {}
-      if (state.status !== 'done') reconnect();
-    };
-    proc.on('error', (e) => c.lost(`spawn error ${e.message}`));
-    proc.on('exit', (code) => c.lost(`proxy exit ${code}`));
-    proc.stderr.on('data', (d) => log(`proxy stderr ${String(d).trim().slice(0, 300)}`));
-    // Минимальный WebSocket-клиент поверх stdio прокси: рукопожатие, маскированные текстовые кадры.
-    c.sendFrame = (opcode, payload) => {
-      if (!c.alive) return;
-      const data = Buffer.from(payload);
-      const mask = randomBytes(4);
-      const len = data.length;
-      const head = len < 126 ? Buffer.from([0x80 | opcode, 0x80 | len])
-        : len < 65536 ? Buffer.from([0x80 | opcode, 0x80 | 126, len >> 8, len & 255])
-        : Buffer.concat([Buffer.from([0x80 | opcode, 0x80 | 127]), (() => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(len)); return b; })()]);
-      for (let i = 0; i < len; i++) data[i] ^= mask[i & 3];
-      proc.stdin.write(Buffer.concat([head, mask, data]));
-    };
-    const onFrames = () => {
-      for (;;) {
-        if (raw.length < 2) return;
-        const fin = raw[0] & 0x80;
-        const opcode = raw[0] & 0x0f;
-        let len = raw[1] & 0x7f;
-        let off = 2;
-        if (len === 126) { if (raw.length < 4) return; len = raw.readUInt16BE(2); off = 4; }
-        else if (len === 127) { if (raw.length < 10) return; len = Number(raw.readBigUInt64BE(2)); off = 10; }
-        const masked = raw[1] & 0x80;
-        const maskKey = masked ? raw.subarray(off, off + 4) : null;
-        if (masked) off += 4;
-        if (raw.length < off + len) return;
-        const payload = Buffer.from(raw.subarray(off, off + len));
-        if (maskKey) for (let i = 0; i < len; i++) payload[i] ^= maskKey[i & 3];
-        raw = raw.subarray(off + len);
-        if (opcode === 9) { c.sendFrame(10, payload); continue; }
-        if (opcode === 8) { c.lost('ws close'); return; }
-        if (opcode === 1 || opcode === 0) {
-          fragments.push(payload);
-          if (fin) { const text = Buffer.concat(fragments).toString('utf8'); fragments = []; onMessage(c, text); }
-        }
-      }
-    };
-    proc.stdout.on('data', (d) => {
-      raw = Buffer.concat([raw, d]);
-      if (!handshaken) {
-        const end = raw.indexOf('\r\n\r\n');
-        if (end < 0) return;
-        const head = raw.subarray(0, end).toString();
-        if (!head.startsWith('HTTP/1.1 101')) { c.lost(`handshake failed ${head.slice(0, 200)}`); return; }
-        handshaken = true;
-        raw = raw.subarray(end + 4);
-        boot(c);
-      }
-      onFrames();
-    });
-    proc.stdin.write(`GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+    c.ready.then(() => boot(c), () => {});
   }
 
   function reconnect() {
-    if (attempt >= RETRY_MS.length) { log('reconnect: attempts exhausted'); done('error', 1); }
+    if (attempt >= RETRY_MS.length) { log('reconnect: attempts exhausted'); void done('error', 1); return; }
     const wait = RETRY_MS[attempt++];
     state.status = 'reconnecting';
     save();
@@ -196,36 +149,31 @@ function runCodex() {
   // поднимается дольше - ему больше времени.
   const REQUEST_MS = Number(process.env.BROKER_REQUEST_MS ?? 90_000);
   const SLOW = new Set(['thread/start', 'thread/resume']);
-  const request = (method, params) => new Promise((resolve, reject) => {
-    const c = conn;
-    if (!c?.alive) { reject({ reason: 'disconnected', message: 'no connection' }); return; }
-    const id = c.nextId++;
-    const limit = SLOW.has(method) ? REQUEST_MS * 10 / 3 : REQUEST_MS;
-    const timer = setTimeout(() => {
-      if (c.pending.has(id)) c.lost(`request timeout ${method} after ${limit} ms`);
-    }, limit);
-    const settle = (fn) => (v) => { clearTimeout(timer); fn(v); };
-    c.pending.set(id, { resolve: settle(resolve), reject: settle(reject), method });
-    c.sendFrame(1, JSON.stringify({ jsonrpc: '2.0', id, method, params }));
-  });
-  const notify = (method, params) => conn?.sendFrame(1, JSON.stringify({ jsonrpc: '2.0', method, params }));
+  const request = (method, params, limit) => conn?.request(method, params,
+    limit ?? (SLOW.has(method) ? REQUEST_MS * 10 / 3 : REQUEST_MS))
+    ?? Promise.reject({ reason: 'disconnected', message: 'no connection' });
+  const notify = (method, params) => conn?.notify(method, params);
 
-  function onMessage(c, text) {
-    let msg;
-    try { msg = JSON.parse(text); } catch { log(`bad json ${text.slice(0, 200)}`); return; }
-    if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined) && c.pending.has(msg.id)) {
-      const p = c.pending.get(msg.id);
-      c.pending.delete(msg.id);
-      if (msg.error) { log(`error ${p.method}: ${JSON.stringify(msg.error).slice(0, 400)}`); p.reject(msg.error); }
-      else p.resolve(msg.result);
-      return;
+  shutdownCodex = async (status, code = 0) => {
+    if (closing) return;
+    closing = true; clearInterval(conn?.ticker);
+    state.archived = false;
+    try {
+      if (threadId) {
+        await request('thread/archive', { threadId }, Math.min(REQUEST_MS, 5000));
+        state.archived = true;
+      }
+    } catch (error) { log(`archive failed: ${error.message || JSON.stringify(error)}`); }
+    finally {
+      state.status = status; save(); log(`exit ${status} archived ${state.archived}`);
+      conn?.close(); process.exit(code);
     }
-    if (msg.id !== undefined && msg.method) {
-      // Запрос сервера (одобрения и т.п.): с approvalPolicy never их быть не должно - отказ.
-      log(`server request ${msg.method} -> declined`);
-      c.sendFrame(1, JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'broker: not supported' } }));
-      return;
-    }
+  };
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { void done('done'); });
+  process.on('beforeExit', () => { if (!closing) void done('done'); });
+
+  function onMessage(c, msg) {
+    if (closing) return;
     const m = msg.method;
     const p = msg.params ?? {};
     if (p.threadId && threadId && p.threadId !== threadId) return;
@@ -267,7 +215,7 @@ function runCodex() {
   async function handle(text) {
     if (text === '/exit') {
       if (turnId) await request('turn/interrupt', { threadId, turnId }).catch(() => undefined);
-      done('done');
+      await done('done'); return;
     }
     if (text === '/interrupt') {
       if (turnId) { log('interrupt'); await request('turn/interrupt', { threadId, turnId }).catch(() => undefined); }
@@ -287,11 +235,11 @@ function runCodex() {
   }
 
   async function pump() {
-    if (busy || !threadId || !conn?.alive || state.status === 'reconnecting') return;
+    if (closing || busy || !threadId || !conn?.alive || state.status === 'reconnecting') return;
     busy = true;
     try {
       queue.push(...takeInbox());
-      while (queue.length && conn?.alive) {
+      while (!closing && queue.length && conn?.alive) {
         const text = queue.shift();
         try { await handle(text); }
         catch (e) {
@@ -314,7 +262,7 @@ function runCodex() {
       if (!threadId) {
         const res = await request('thread/start', threadParams());
         threadId = res.thread?.id;
-        state.threadId = threadId;
+        state.threadId = threadId; state.archived = false;
         state.model = res.model;
         state.sandbox = res.sandbox;
         save();
@@ -323,7 +271,17 @@ function runCodex() {
         const first = fs.readFileSync(opt.prompt, 'utf8');
         await startTurn(first, opt.images).catch((e) => { if (isDrain(e)) queue.push(first); throw e; });
       } else {
-        const res = await request('thread/resume', { threadId, ...threadParams() });
+        const stored = state.archived ? null : await request('thread/read', { threadId, includeTurns: false });
+        if (state.archived || /[\\/]archived_sessions[\\/]/.test(plain(stored?.thread?.path) || '')) {
+          await request('thread/unarchive', { threadId }); state.archived = false; save();
+        }
+        let res;
+        try { res = await request('thread/resume', { threadId, ...threadParams() }); }
+        catch (error) {
+          if (!/is archived/i.test(error.message || '')) throw error;
+          await request('thread/unarchive', { threadId }); state.archived = false; save();
+          res = await request('thread/resume', { threadId, ...threadParams() });
+        }
         attempt = 0;
         const turns = res.thread?.turns ?? [];
         const last = turns[turns.length - 1];
@@ -349,12 +307,12 @@ function runCodex() {
       }
       c.ticker = setInterval(() => {
         pump();
-        if (state.status === 'idle' && Date.now() - lastActivity > opt.idleMin * 60_000) done('done');
+        if (!closing && state.status === 'idle' && Date.now() - lastActivity > opt.idleMin * 60_000) void done('done');
       }, 1000);
       pump();
     } catch (e) {
       log(`boot failed ${JSON.stringify(e).slice(0, 400)}`);
-      if (!threadId && !isDrain(e)) done('error', 1);
+      if (!threadId && !isDrain(e)) { await done('error', 1); return; }
       c.lost('boot failed');
     }
   }
