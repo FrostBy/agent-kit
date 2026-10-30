@@ -1,6 +1,6 @@
 {
   "name": "agent-kit",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Agent kit for Claude Code and Codex CLI: one dependency-free statusline for both, Codex patches and faster Codex voice.",
   "bin": { "agent-kit": "statusline.js", "agent-statusline": "statusline.js", "claude-statusline-ultimate": "statusline.js" },
   "main": "statusline.js",
