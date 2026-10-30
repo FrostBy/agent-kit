@@ -90,6 +90,13 @@ test('rate limit: pace marker only when burning faster than the window', () => {
   const slow = renderLines(cfg, { in: { rate_limits: { five_hour: { used_percentage: 10, resets_at: s + 3600 } } }, now: NOW });
   assert.match(fast[0], /out in/);
   assert.doesNotMatch(slow[0], /out in/);
+  // Late in the week a small lead still runs out before the reset: 98% used with 10h25m of 168h left.
+  const week = plain({ lines: [['limit-7d']] });
+  const late = renderLines(week, { in: { rate_limits: { seven_day: { used_percentage: 98, resets_at: s + 37500 } } }, now: NOW });
+  assert.match(late[0], /out in 3h/);
+  // Early in the week the same small lead is noise.
+  const early = renderLines(week, { in: { rate_limits: { seven_day: { used_percentage: 12, resets_at: s + 6.5 * 86400 } } }, now: NOW });
+  assert.doesNotMatch(early[0], /out in/);
 });
 
 test('git porcelain v2 and numstat parsing', () => {

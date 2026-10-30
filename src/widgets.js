@@ -32,7 +32,9 @@ function limitText(t, label, pct, resetsAt, windowSec, now, o) {
     const left = reset - now / 1000;
     const elapsed = 100 - (left / windowSec) * 100;
     const hitIn = ((100 - pct) / (pct / elapsed)) / 100 * windowSec;
-    if (elapsed > 1 && pct - elapsed > (o.paceMargin ?? 10) && hitIn < left) runsOut = duration(hitIn * 1000);
+    // The margin damps early-window noise; it shrinks with the time left so a late overrun (98% with 6% left) still warns.
+    const margin = (o.paceMargin ?? 10) * (left / windowSec);
+    if (elapsed > 1 && pct - elapsed > margin && hitIn < left) runsOut = duration(hitIn * 1000);
   }
   const v = (s) => (runsOut ? t.paint('crit', s) : t.sev(pct, s));
   let s = `${t.paint('muted', label)} ${o.bar ? `${v(bar(pct, o.bar, t.icon('barFull'), t.icon('barEmpty')))} ` : ''}${v(`${pct}%`)}`;
