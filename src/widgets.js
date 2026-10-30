@@ -287,9 +287,13 @@ for (const id of ['codex', 'kimi']) {
       const source = d[id];
       if (!source) return null;
       const agents = (source.agents || [source]).filter((a) => byId[id].accepts(d, o, a.updatedAt));
+      // One row per agent: pad plain text before painting so name/model/effort line up in columns.
+      const col = (get) => Math.max(0, ...agents.map((a) => (get(a) || '').length));
+      const nw = col((a) => a.name), mw = col((a) => a.input.model?.display_name), ew = col((a) => a.input.effort?.level);
+      const pad = (s, w) => (w ? (s || '').padEnd(w) : s);
       const rendered = agents.map((agent) => {
-        const input = agent.input, u = input.token_usage;
-        const parts = [[agent.name && t.paint('muted', agent.name), input.model?.display_name && t.paint('model', input.model.display_name), input.effort?.level && t.paint('muted', input.effort.level)].filter(Boolean).join(' '),
+        const input = agent.input, u = input.token_usage, rows = agents.length > 1;
+        const parts = [[nw && t.paint('muted', rows ? pad(agent.name, nw) : agent.name), mw && t.paint('model', rows ? pad(input.model?.display_name, mw) : input.model?.display_name), ew && t.paint('muted', rows ? pad(input.effort?.level, ew) : input.effort?.level)].filter((s) => s && s.trim()).join(' '),
           contextText(input.context_window, optsFor(byId.context, {}), t),
           o.tokens && u && t.paint('muted', 'in ' + tokens(u.input_tokens || 0) + ' out ' + tokens(u.output_tokens || 0) + ' cache ' + tokens(u.cached_input_tokens || 0)),
           agent.limited && t.paint('crit', agent.limitWindow ? `limit ${agent.limitWindow}` : 'limit')].filter(Boolean);
@@ -297,7 +301,13 @@ for (const id of ['codex', 'kimi']) {
       }).filter(Boolean);
       const quotas = agents.find((a) => a.input.quota_windows?.length)?.input.quota_windows || [];
       const limits = quotas.map((w) => limitText(t, w.label, w.used_percentage, w.resets_at, w.window_seconds, d.now, optsFor(byId['limit-5h'], {}))).filter(Boolean);
-      const parts = [rendered.join(t.paint('muted', ' · ')), ...limits].filter(Boolean);
+      if (rendered.length > 1) {
+        // Claude Code trims leading whitespace; U+2800 keeps the continuation rows indented under the first agent.
+        const indent = '⠀' + ' '.repeat(id.length);
+        const first = [rendered[0], ...limits].join(t.paint('separator', o.separator));
+        return { text: null, rows: [t.paint('muted', id) + ' ' + first, ...rendered.slice(1).map((r) => indent + r)] };
+      }
+      const parts = [...rendered, ...limits].filter(Boolean);
       return parts.length ? t.paint('muted', id) + ' ' + parts.join(t.paint('separator', o.separator)) : null;
     } });
 }

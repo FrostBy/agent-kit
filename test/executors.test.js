@@ -120,22 +120,22 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   };
   const output = async (over) => (await render(input, cfg(over), now, sources)).join('\n');
   let out = await output();
-  assert.match(out, /^codex slice Luna high.* · dry2 Sol high/);
+  assert.match(out, /^codex slice Luna high[^\n]*\n⠀ +dry2 +Sol +high/);
   assert.doesNotMatch(out, /booting/);
   assert.match(out, /ctx .*25%.*7d/);
   state('codex/slice', 'codex', 'running', 'thread-second', 1000);
   out = await output({ widgets: { codex: { tokens: true } } });
-  assert.match(out, /^codex slice Luna high.* · dry2 Sol high/);
+  assert.match(out, /^codex slice Luna high[^\n]*\n⠀ +dry2 +Sol +high/);
   assert.equal((out.match(/7d/g) || []).length, 1);
   assert.match(out, /in 2k out 0 cache 0/);
-  assert.ok(out.indexOf('7d') > out.indexOf('dry2'));
+  assert.match(out, /^codex slice[^\n]*7d/);
   const originalRead = fs.readSync;
   fs.readSync = () => assert.fail('unchanged broker rollout read');
   try { assert.equal(codex.load(root, now, home, () => true, scratchpad).agents.length, 2); }
   finally { fs.readSync = originalRead; }
   fs.appendFileSync(first, JSON.stringify({ type: 'turn_context', payload: { model: 'Updated' } }) + '\n');
   fs.utimesSync(first, (now - 3 * 3600000) / 1000, (now - 3 * 3600000) / 1000);
-  assert.match(await output(), /dry2 Updated/);
+  assert.match(await output(), /dry2 +Updated/);
   assert.equal(codex.load(root, now + 120000, home, (at) => now + 120000 - at <= 60000, scratchpad), null);
   assert.equal(await output({ widgets: { codex: { exclude: root } } }), '');
   const extras = ['third', 'fourth'].map((name) => state(name, 'codex', 'running', 'thread-first'));
@@ -143,9 +143,9 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   for (const file of extras) fs.rmSync(file);
   state('dry2', 'codex', 'idle', 'thread-first', 2000);
   state('codex/slice', 'codex', 'idle', 'thread-second', 1000);
-  assert.match(await output(), /^codex slice Luna.*dry2/);
+  assert.match(await output(), /^codex slice Luna[\s\S]*dry2/);
   state('dry2', 'codex', 'starting', 'thread-first', 2000);
-  assert.match(await output(), /dry2 Updated/);
+  assert.match(await output(), /dry2 +Updated/);
   state('dry2', 'codex', 'done', 'thread-first');
   state('codex/slice', 'codex', 'error', 'thread-second');
   const exec = rollout('aaa-exec', 'exec', 'Exec');
@@ -201,7 +201,7 @@ test('broker freshness follows turn events, including incremental updates and fa
   assert.match(await output(), /codex active/);
   assert.doesNotMatch(await output(), /old/);
   fs.appendFileSync(file, JSON.stringify(event('agent_message', 1)) + '\n');
-  assert.match(await output(), /old.*active/);
+  assert.match(await output(), /old[\s\S]*active/);
   fs.rmSync(path.join(scratchpad, 'active.state.json'));
   fs.appendFileSync(file, JSON.stringify(event('turn_aborted', 30)) + '\n');
   assert.equal(await output(), '');
