@@ -8,11 +8,13 @@
   <img src="https://img.shields.io/badge/i18n-en%20%7C%20ru-informational" alt="English and Russian">
 </p>
 
-**Agent kit for [Claude Code](https://code.claude.com) and [Codex CLI](https://github.com/openai/codex): one statusline for both, plus Codex patches.**
+**Agent kit for [Claude Code](https://code.claude.com) and [Codex CLI](https://github.com/openai/codex): one statusline for both, Codex patches, an agent broker and two-way session sync.**
 
 - **Statusline for Claude Code and Codex** (Codex: native footer or a log panel): context, quotas, git across umbrella repositories, runtime activity, Codex/Kimi executor widgets. Dependency-free Node, TUI editor, English and Russian.
 - **Codex patches**: a native footer driven by the same renderer, full diffs, command timing, capacity retries, Shift+Tab Plan/Auto, restricted subagents via a `readonly-`/`plan-` task name prefix. You build Codex yourself from the patched sources; no binaries are shipped.
 - **Faster Codex voice**: a realtime prompt for quicker speech (configuration only).
+- **Agent broker**: Claude runs Codex/Kimi as background executors; finished Codex threads are archived so they do not clutter session lists.
+- **Session sync (experimental)**: a Claude Code session and a Codex session in the same project mirror each other both ways, with native history, titles and tool calls; continue in Codex when Claude tokens run out and back.
 
 Русская версия: [README.RU.md](README.RU.md)
 
@@ -123,6 +125,73 @@ The log inspector reads `~/.codex/sessions` (or `$CODEX_HOME/sessions`), then on
 This is a separate panel, rather than an extension of Codex's built-in `/statusline`. It can run alongside CLI, desktop or IDE sessions with local logs. The log format is internal and may change. Tool activity, plans and subagents require their corresponding log events; nested code-mode commands are not parsed. Codex mode does not read Claude OAuth credentials or make network requests. Dollar costs and cache-expiry estimates are not computed.
 
 Configure with `node statusline.js --codex --configure`. Codex has its own `~/.codex/statusline.json`. `AGENT_STATUSLINE_CONFIG` overrides the file for either mode; `CLAUDE_STATUSLINE_CONFIG` still works for Claude.
+
+## Agent broker and session sync (experimental)
+
+Manual real-daemon/model smoke (not part of npm test): `node scripts/agents/smoke-live.js --live` requests exactly `pong`, sends `/exit`, and verifies `state.archived=true` plus SQLite `archived=1` using read-only access; artifacts are retained. Without `--live` it performs no actions. The manual SQLite check requires Node 22.13+; the broker still supports Node 20.
+
+Sync/broker use `codex app-server proxy`: originator is process-global in Codex 0.166, so initialize cannot isolate it; sync registries/managed checkpoints protect mirrors from both archive paths across default/env/explicit Claude profiles (`--claude-config-dir DIR` is repeatable, corrupt registries fail closed). Proxy only connects to an existing socket; if needed, start the daemon with `codex app-server daemon start`.
+
+Read-only audit: `node scripts/agents/audit-mirror.js --claude "<transcript.jsonl>" [--codex-home DIR] [--count 3] [--json]`. It exercises extraction and the actual presentation renderers, selects related interactive non-broker rollouts, and prints categories/counts/display examples without conversation bodies or tool arguments. RAW, service text as a user message, or insufficient Codex samples exits 1. All unknown/nonportable tools share a bounded assistant-summary fallback that never copies raw outputs. Todo/plan and web operations use native counterparts where sufficient data exists; foreign MCP/agent identities and live actions are never fabricated.
+
+User-message/runtime markup handling:
+
+| Record / marker | Handling |
+| --- | --- |
+| Claude bash-input → bash-stdout/bash-stderr | Pair by parent UUID across incremental hooks; emit native Codex CommandExecution with source `user_shell` (“You ran”). Preserve bounded stdout/stderr; do not invent exit codes. |
+| Codex user_shell_command / shell.user_command | Import its command/result once, ignoring duplicate UI events; render linked native Claude bash-mode records. Codex's combined output is not guessed into separate streams. |
+| Shell model-context archive/delivery | Bounded `User ran: … / Output: …`, without XML wrappers. Claude native resume uses its normal bash-mode representation. |
+| Pending/orphan shell records | Hold input until output; discard orphan or mismatched-parent output. |
+| command-name/message/args, local-command-stdout/caveat | Drop slash-command machinery, preserving neighboring genuine text. |
+| user-memory-input | Drop local memory operations; never replay memory writes (not observed in the inspected transcript). |
+| system-reminder, task-notification, agent-message | Drop nonhuman origins and nested/unfinished service blocks. |
+| Codex environment_context, user_instructions, AGENTS.md instructions | Drop metadata-classified environment/project context. |
+| hook_prompt/additional_context, turn_aborted, subagent_notification, codex_internal_context, goal_context | Drop service context by per-block metadata and markers. |
+| Standalone Codex skill fragment | Drop injected skill instructions. |
+| persisted-output inside shell output | Unwrap bounded preview; do not read referenced files. |
+| Arbitrary HTML/XML/TypeScript in real user input | Preserve as data, rather than stripping all tags. |
+
+Imported Claude records carry `session_sync_key` to prevent native tool/shell history from echoing back. Imports execute no commands; updates to open sessions still use additionalContext.
+
+Imported tools render natively where their recorded data is sufficient: Claude Bash becomes Codex CommandExecution (Ran), edits become FileChange diffs, and Read/Grep/Glob/LS use exploration actions (Explored). Codex exec/shell becomes Claude Bash; apply_patch add/update operations become paired Write/Edit calls. Other tools, incomplete commands and unsupported delete/move patches remain short observations. Edit diff line numbers are relative to the supplied fragments; unknown exit codes/durations are omitted. These Codex UI events are ignored by model-history reconstruction, so injected context is not repeated. `demo-sync.js` includes Bash/Edit/Read and verifies native resume tool items without running a model.
+
+Codex brokers archive their thread on `/exit`, idle timeout or graceful shutdown, unarchive before resume, and keep failed turns open; `node scripts/agents/archive-broker-sessions.js [--minutes 60] [--state DIR] [--apply]` defaults to a read-only list of old idle broker sessions.
+
+`node install.js --only broker` shows the broker command; npm also exposes `agent-broker`. It runs Codex through `codex app-server proxy`, or Kimi through its CLI, with an inbox for follow-up messages, steering and interruption. Put `--state` in the scratchpad used by the statusline; existing `.state.json` consumers remain compatible. Executables come from PATH, or `AGENT_BROKER_CODEX` / `AGENT_BROKER_KIMI` (executable paths, not shell commands).
+
+```sh
+node scripts/agents/broker.js --agent codex --name reviewer --state /tmp/scratchpad --prompt /tmp/prompt.md --cwd /path/to/project
+node install.js --only sync
+node scripts/agents/sync.js uninstall
+```
+
+Sync is **off by default**, including with `--yes`; opt in using the experimental checkbox or `--only sync`. Installation adds global hooks to `CLAUDE_CONFIG_DIR/settings.json` and `CODEX_HOME/config.toml` (defaults: `~/.claude`, `~/.codex`). Global hooks let any project work without editing that project. Sync activates only after both clients have visited this cwd: its project table exists in Codex config and its Claude project directory exists. Each originating session gets its own pair, partitioned by cwd. Resume the generated `<source title> · Claude/Codex` session in the other client. Only the new archived Codex mirror receives UI presentation records; later model-context updates arrive through hooks without editing a loaded rollout.
+
+Only `SessionStart`, `UserPromptSubmit`, and `Stop` are used: the first two deliver pending context, Stop captures completed work. There is no per-tool process scan. CLI eligibility is reused while its process identity is unchanged; the initial Windows CIM / Unix ps check can be slower. Broker agents (`SESSION_SYNC_BROKER`), `SESSION_SYNC_EXCLUDE`, noninteractive exec/print sessions and subagents/sidechains are excluded. Codex requires a CLI build supporting these experimental hooks and `additionalContext`.
+
+Seeds and backlog replacements use the latest compact summary plus the bounded recent context; without compaction, omitted earlier history is labeled. The default budget is about 50k tokens (UTF-8 bytes / 4), configurable with `SESSION_SYNC_CONTEXT_TOKENS`; compaction or an oversized pending backlog replaces that backlog with current context.
+
+Hook delivery is separate from the seed budget: Claude has a [10,000-character cap](https://code.claude.com/docs/en/hooks#json-output), so sync conservatively uses 10,000 UTF-8 bytes. Codex's `additionalContextLimit` is approximate tokens (`ceil(UTF-8 bytes / 4)`): our 16000 means 64000 bytes, default 2500, 0 unlimited; no explicit maximum beyond `usize` ([spill implementation](.native/codex/codex-rs/hooks/src/output_spill.rs), [estimator](.native/codex/codex-rs/utils/string/src/truncate.rs)). Snapshots and large events are sent in sequential acknowledged chunks, each marked at the start. Busy locks exit silently and expire after 30 seconds; unchanged checkpoints are not rewritten, event keys are bounded to 256, and denied decisions to 128 entries / seven days. CLI PID/start-time checks reuse eligibility across SessionStart; Windows uses local WSH/WMI for identity, falling back to full CIM if unavailable. Claude mirror versions use transcripts or a cached `--version` query; Codex writes its own metadata.
+
+Sync transfers user/assistant text and completed tool inputs/results as attributed **plaintext observations**, never live tool calls. Thinking, images, attachments, encrypted compaction data and unfinished tool results are omitted. It reads no credentials itself and starts no model turn; Codex mirror creation uses the local app-server API, transferred text can still contain private data from conversations and tools. Rollbacks, invalid records, unknown mirrors and paths outside configured roots fail closed.
+
+Archives live under `CLAUDE_CONFIG_DIR/agent-kit/sync/<cwd-hash>/`: append-only `.events` files plus per-pair checkpoints with byte offsets, keys and pending references; `pairs.json` contains IDs only. Keep state with its mirrors. Installation/removal is idempotent, backs up changed existing settings, and preserves unrelated hooks, subsequent configuration edits, session files and archives. Uninstall removes hooks only; it does not restore an old configuration over newer edits.
+
+Manual offline timing on **copies** of an existing legacy pair (no authentication or client startup):
+
+```sh
+node scripts/agents/measure-sync.js /path/to/session-sync-state/pairs.json
+```
+
+This creates temporary isolated homes, copies only the paired transcripts, imports the old event ledger, reports initial rebuild and repeated CLI hook timings, then removes its temporary tree. Eligibility is prevalidated for offline copies, so the initial CIM/ps probe is excluded; Node startup is included in repeated timings.
+
+Codex mirrors use `thread/start` (persistent, canonical cwd), `thread/inject_items` and `thread/name/set`; the server supplies the ID/path and owns SQLite/model-history writes. In 0.166, injection has no user event and metadata/update cannot set preview: a temporary **paused** goal, immediately cleared, publishes native preview without a turn or model-context duplication. The SQLite picker filters nonempty preview; `vscode` is interactive. Goals must be available; otherwise creation is deferred and logged, without enabling features or falling back to synthetic rollouts. Interrupted creation retries the same thread. To replace a legacy file mirror, close both clients and run `node scripts/agents/recreate-mirror.js "<pairs.json>" "<pair-id>" --apply` (omit `--apply` for a plan); originals are backed up and the next source hook creates the native mirror.
+
+Mirror titles follow the source custom title/summary/first prompt (`<title> ? Claude/Codex`) and update only on changes. Creation has a 27-second deadline, injection up to 20 seconds, and generated hooks/leases allow 30 seconds (re-run the sync installer yourself to update already-installed timeouts). No sandbox, approval or permissions override is sent at thread/start. Existing saved read-only policies survive resume; `node scripts/agents/reset-mirror-settings.js <thread-id> --apply` restores project defaults through an ephemeral probe and thread/settings/update.
+
+Visible imported history is separate from model history: the new Codex thread is archived/unloaded, its proxy closed, UI-only legacy events and canonical ItemCompleted entries appended atomically with paginated ordinals, then unarchived. Claude gets native completed tool_use/tool_result pairs with matching IDs and source model labels. Live arrivals still use additionalContext: there is no history-only visible insertion API; editing a loaded rollout is unsafe. A future visible-arrival mode should queue UI records until a confirmed unload/resume. Ctx and quotas are supplied by native model turns, never fabricated from the import.
+
+Manual UI demo: `node scripts/agents/demo-sync.js`. It creates both directions in retained temporary homes, uses dedicated stdio app-servers and a loopback-only provider, copies no auth, verifies native Codex resume items, and prints launch commands for both clients. No real model replies or account quotas are available in this isolated demo.
 
 ## Install
 
@@ -304,70 +373,3 @@ node statusline.js --preview
 ## Licence
 
 [MIT](LICENSE) © Vladislav Romanovsky
-
-## Agent broker and session sync (experimental)
-
-Manual real-daemon/model smoke (not part of npm test): `node scripts/agents/smoke-live.js --live` requests exactly `pong`, sends `/exit`, and verifies `state.archived=true` plus SQLite `archived=1` using read-only access; artifacts are retained. Without `--live` it performs no actions. The manual SQLite check requires Node 22.13+; the broker still supports Node 20.
-
-Sync/broker use `codex app-server proxy`: originator is process-global in Codex 0.166, so initialize cannot isolate it; sync registries/managed checkpoints protect mirrors from both archive paths across default/env/explicit Claude profiles (`--claude-config-dir DIR` is repeatable, corrupt registries fail closed). Proxy only connects to an existing socket; if needed, start the daemon with `codex app-server daemon start`.
-
-Read-only audit: `node scripts/agents/audit-mirror.js --claude "<transcript.jsonl>" [--codex-home DIR] [--count 3] [--json]`. It exercises extraction and the actual presentation renderers, selects related interactive non-broker rollouts, and prints categories/counts/display examples without conversation bodies or tool arguments. RAW, service text as a user message, or insufficient Codex samples exits 1. All unknown/nonportable tools share a bounded assistant-summary fallback that never copies raw outputs. Todo/plan and web operations use native counterparts where sufficient data exists; foreign MCP/agent identities and live actions are never fabricated.
-
-User-message/runtime markup handling:
-
-| Record / marker | Handling |
-| --- | --- |
-| Claude bash-input → bash-stdout/bash-stderr | Pair by parent UUID across incremental hooks; emit native Codex CommandExecution with source `user_shell` (“You ran”). Preserve bounded stdout/stderr; do not invent exit codes. |
-| Codex user_shell_command / shell.user_command | Import its command/result once, ignoring duplicate UI events; render linked native Claude bash-mode records. Codex's combined output is not guessed into separate streams. |
-| Shell model-context archive/delivery | Bounded `User ran: … / Output: …`, without XML wrappers. Claude native resume uses its normal bash-mode representation. |
-| Pending/orphan shell records | Hold input until output; discard orphan or mismatched-parent output. |
-| command-name/message/args, local-command-stdout/caveat | Drop slash-command machinery, preserving neighboring genuine text. |
-| user-memory-input | Drop local memory operations; never replay memory writes (not observed in the inspected transcript). |
-| system-reminder, task-notification, agent-message | Drop nonhuman origins and nested/unfinished service blocks. |
-| Codex environment_context, user_instructions, AGENTS.md instructions | Drop metadata-classified environment/project context. |
-| hook_prompt/additional_context, turn_aborted, subagent_notification, codex_internal_context, goal_context | Drop service context by per-block metadata and markers. |
-| Standalone Codex skill fragment | Drop injected skill instructions. |
-| persisted-output inside shell output | Unwrap bounded preview; do not read referenced files. |
-| Arbitrary HTML/XML/TypeScript in real user input | Preserve as data, rather than stripping all tags. |
-
-Imported Claude records carry `session_sync_key` to prevent native tool/shell history from echoing back. Imports execute no commands; updates to open sessions still use additionalContext.
-
-Imported tools render natively where their recorded data is sufficient: Claude Bash becomes Codex CommandExecution (Ran), edits become FileChange diffs, and Read/Grep/Glob/LS use exploration actions (Explored). Codex exec/shell becomes Claude Bash; apply_patch add/update operations become paired Write/Edit calls. Other tools, incomplete commands and unsupported delete/move patches remain short observations. Edit diff line numbers are relative to the supplied fragments; unknown exit codes/durations are omitted. These Codex UI events are ignored by model-history reconstruction, so injected context is not repeated. `demo-sync.js` includes Bash/Edit/Read and verifies native resume tool items without running a model.
-
-Codex brokers archive their thread on `/exit`, idle timeout or graceful shutdown, unarchive before resume, and keep failed turns open; `node scripts/agents/archive-broker-sessions.js [--minutes 60] [--state DIR] [--apply]` defaults to a read-only list of old idle broker sessions.
-
-`node install.js --only broker` shows the broker command; npm also exposes `agent-broker`. It runs Codex through `codex app-server proxy`, or Kimi through its CLI, with an inbox for follow-up messages, steering and interruption. Put `--state` in the scratchpad used by the statusline; existing `.state.json` consumers remain compatible. Executables come from PATH, or `AGENT_BROKER_CODEX` / `AGENT_BROKER_KIMI` (executable paths, not shell commands).
-
-```sh
-node scripts/agents/broker.js --agent codex --name reviewer --state /tmp/scratchpad --prompt /tmp/prompt.md --cwd /path/to/project
-node install.js --only sync
-node scripts/agents/sync.js uninstall
-```
-
-Sync is **off by default**, including with `--yes`; opt in using the experimental checkbox or `--only sync`. Installation adds global hooks to `CLAUDE_CONFIG_DIR/settings.json` and `CODEX_HOME/config.toml` (defaults: `~/.claude`, `~/.codex`). Global hooks let any project work without editing that project. Sync activates only after both clients have visited this cwd: its project table exists in Codex config and its Claude project directory exists. Each originating session gets its own pair, partitioned by cwd. Resume the generated `<source title> · Claude/Codex` session in the other client. Only the new archived Codex mirror receives UI presentation records; later model-context updates arrive through hooks without editing a loaded rollout.
-
-Only `SessionStart`, `UserPromptSubmit`, and `Stop` are used: the first two deliver pending context, Stop captures completed work. There is no per-tool process scan. CLI eligibility is reused while its process identity is unchanged; the initial Windows CIM / Unix ps check can be slower. Broker agents (`SESSION_SYNC_BROKER`), `SESSION_SYNC_EXCLUDE`, noninteractive exec/print sessions and subagents/sidechains are excluded. Codex requires a CLI build supporting these experimental hooks and `additionalContext`.
-
-Seeds and backlog replacements use the latest compact summary plus the bounded recent context; without compaction, omitted earlier history is labeled. The default budget is about 50k tokens (UTF-8 bytes / 4), configurable with `SESSION_SYNC_CONTEXT_TOKENS`; compaction or an oversized pending backlog replaces that backlog with current context.
-
-Hook delivery is separate from the seed budget: Claude has a [10,000-character cap](https://code.claude.com/docs/en/hooks#json-output), so sync conservatively uses 10,000 UTF-8 bytes. Codex's `additionalContextLimit` is approximate tokens (`ceil(UTF-8 bytes / 4)`): our 16000 means 64000 bytes, default 2500, 0 unlimited; no explicit maximum beyond `usize` ([spill implementation](.native/codex/codex-rs/hooks/src/output_spill.rs), [estimator](.native/codex/codex-rs/utils/string/src/truncate.rs)). Snapshots and large events are sent in sequential acknowledged chunks, each marked at the start. Busy locks exit silently and expire after 30 seconds; unchanged checkpoints are not rewritten, event keys are bounded to 256, and denied decisions to 128 entries / seven days. CLI PID/start-time checks reuse eligibility across SessionStart; Windows uses local WSH/WMI for identity, falling back to full CIM if unavailable. Claude mirror versions use transcripts or a cached `--version` query; Codex writes its own metadata.
-
-Sync transfers user/assistant text and completed tool inputs/results as attributed **plaintext observations**, never live tool calls. Thinking, images, attachments, encrypted compaction data and unfinished tool results are omitted. It reads no credentials itself and starts no model turn; Codex mirror creation uses the local app-server API, transferred text can still contain private data from conversations and tools. Rollbacks, invalid records, unknown mirrors and paths outside configured roots fail closed.
-
-Archives live under `CLAUDE_CONFIG_DIR/agent-kit/sync/<cwd-hash>/`: append-only `.events` files plus per-pair checkpoints with byte offsets, keys and pending references; `pairs.json` contains IDs only. Keep state with its mirrors. Installation/removal is idempotent, backs up changed existing settings, and preserves unrelated hooks, subsequent configuration edits, session files and archives. Uninstall removes hooks only; it does not restore an old configuration over newer edits.
-
-Manual offline timing on **copies** of an existing legacy pair (no authentication or client startup):
-
-```sh
-node scripts/agents/measure-sync.js /path/to/session-sync-state/pairs.json
-```
-
-This creates temporary isolated homes, copies only the paired transcripts, imports the old event ledger, reports initial rebuild and repeated CLI hook timings, then removes its temporary tree. Eligibility is prevalidated for offline copies, so the initial CIM/ps probe is excluded; Node startup is included in repeated timings.
-
-Codex mirrors use `thread/start` (persistent, canonical cwd), `thread/inject_items` and `thread/name/set`; the server supplies the ID/path and owns SQLite/model-history writes. In 0.166, injection has no user event and metadata/update cannot set preview: a temporary **paused** goal, immediately cleared, publishes native preview without a turn or model-context duplication. The SQLite picker filters nonempty preview; `vscode` is interactive. Goals must be available; otherwise creation is deferred and logged, without enabling features or falling back to synthetic rollouts. Interrupted creation retries the same thread. To replace a legacy file mirror, close both clients and run `node scripts/agents/recreate-mirror.js "<pairs.json>" "<pair-id>" --apply` (omit `--apply` for a plan); originals are backed up and the next source hook creates the native mirror.
-
-Mirror titles follow the source custom title/summary/first prompt (`<title> ? Claude/Codex`) and update only on changes. Creation has a 27-second deadline, injection up to 20 seconds, and generated hooks/leases allow 30 seconds (re-run the sync installer yourself to update already-installed timeouts). No sandbox, approval or permissions override is sent at thread/start. Existing saved read-only policies survive resume; `node scripts/agents/reset-mirror-settings.js <thread-id> --apply` restores project defaults through an ephemeral probe and thread/settings/update.
-
-Visible imported history is separate from model history: the new Codex thread is archived/unloaded, its proxy closed, UI-only legacy events and canonical ItemCompleted entries appended atomically with paginated ordinals, then unarchived. Claude gets native completed tool_use/tool_result pairs with matching IDs and source model labels. Live arrivals still use additionalContext: there is no history-only visible insertion API; editing a loaded rollout is unsafe. A future visible-arrival mode should queue UI records until a confirmed unload/resume. Ctx and quotas are supplied by native model turns, never fabricated from the import.
-
-Manual UI demo: `node scripts/agents/demo-sync.js`. It creates both directions in retained temporary homes, uses dedicated stdio app-servers and a loopback-only provider, copies no auth, verifies native Codex resume items, and prints launch commands for both clients. No real model replies or account quotas are available in this isolated demo.
