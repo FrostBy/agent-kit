@@ -109,7 +109,7 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   const first = rollout('thread-first', 'vscode', 'Sol', { cwd: home + '-elsewhere' });
   rollout('thread-second', 'vscode', 'Luna');
   state('dry2', 'codex', 'running', 'thread-first', 2000);
-  state('slice', 'codex', 'idle', 'thread-second', 1000);
+  state('codex/slice', 'codex', 'idle', 'thread-second', 1000);
   state('booting', 'codex', 'starting', undefined);
   write(path.join(scratchpad, 'broken.state.json'), '{broken');
   const input = { workspace: { project_dir: root }, scratchpad_dir: scratchpad };
@@ -123,7 +123,7 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   assert.match(out, /^codex slice Luna high.* · dry2 Sol high/);
   assert.doesNotMatch(out, /booting/);
   assert.match(out, /ctx .*25%.*7d/);
-  state('slice', 'codex', 'running', 'thread-second', 1000);
+  state('codex/slice', 'codex', 'running', 'thread-second', 1000);
   out = await output({ widgets: { codex: { tokens: true } } });
   assert.match(out, /^codex slice Luna high.* · dry2 Sol high/);
   assert.equal((out.match(/7d/g) || []).length, 1);
@@ -142,12 +142,12 @@ test('broker executors: session IDs, running priority, shared quotas and exec fa
   assert.equal(codex.load(root, now, home, () => true, scratchpad).agents.length, 3);
   for (const file of extras) fs.rmSync(file);
   state('dry2', 'codex', 'idle', 'thread-first', 2000);
-  state('slice', 'codex', 'idle', 'thread-second', 1000);
+  state('codex/slice', 'codex', 'idle', 'thread-second', 1000);
   assert.match(await output(), /^codex slice Luna.*dry2/);
   state('dry2', 'codex', 'starting', 'thread-first', 2000);
   assert.match(await output(), /dry2 Updated/);
   state('dry2', 'codex', 'done', 'thread-first');
-  state('slice', 'codex', 'error', 'thread-second');
+  state('codex/slice', 'codex', 'error', 'thread-second');
   const exec = rollout('aaa-exec', 'exec', 'Exec');
   fs.utimesSync(exec, now / 1000, now / 1000);
   rollout('zzz-vscode', 'vscode', 'Wrong');
