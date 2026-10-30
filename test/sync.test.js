@@ -235,7 +235,7 @@ test('install and uninstall follow file symlinks and keep links and unrelated ta
   for (const remove of [false, true]) {
     configure({ env: f.env, remove, log: () => {} });
     assert((await fs.lstat(settings)).isSymbolicLink()); assert((await fs.lstat(toml)).isSymbolicLink());
-    assert.equal(await fs.realpath(settings), target); assert.equal(await fs.realpath(toml), tomlTarget);
+    assert.equal(await fs.realpath(settings), await fs.realpath(target)); assert.equal(await fs.realpath(toml), await fs.realpath(tomlTarget));
     assert.equal(JSON.parse(await fs.readFile(target)).keep, true);
     assert.equal(Boolean(JSON.parse(await fs.readFile(target)).hooks), !remove);
   }
