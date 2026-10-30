@@ -34,6 +34,13 @@ async function canonical(file) {
   return path.join(parent, ...tail);
 }
 
+// 8.3 short names and the \\?\ prefix differ textually from canonical paths; compare resolved paths.
+async function samePath(a, b) {
+  if (same(a, b)) return true;
+  const plain = p => p.replace(/^\\\\\?\\/, '');
+  return same(await canonical(plain(a)), await canonical(plain(b)));
+}
+
 async function withConfig(config, fn) {
   
   for (const key of ['cwd', 'stateDir', 'claudeProjectsDir', 'codexSessionsDir', 'codexHome']) {
@@ -397,7 +404,7 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
       let pair = mapping ? await readJson(path.join(config.stateDir, `${mapping.id}.json`)) : null;
       if (mapping && !pair) throw Error('Pair state missing');
       const beforePair = pair ? JSON.stringify(pair) : null;
-      if (pair && (pair[kind].file && !same(pair[kind].file, input.transcript_path) || !same(pair[kind].cwd, config.cwd))) throw Error('Session transcript path changed');
+      if (pair && ((pair[kind].file && !await samePath(pair[kind].file, input.transcript_path)) || !await samePath(pair[kind].cwd, config.cwd))) throw Error('Session transcript path changed');
       const reads = {};
       async function scan(client, endpoint) {
         if (endpoint.mirror && !endpoint.seeded) return null;
@@ -414,7 +421,7 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
         endpoint.meta = meta ? (client === 'claude' ? { sessionId: meta.sessionId, cwd: meta.cwd, version: meta.version }
           : { id: meta.id, cwd: meta.cwd, source: meta.source, originator: meta.originator, cli_version: meta.cli_version, parent_thread_id: meta.parent_thread_id, session_sync: meta.session_sync }) : (read.reset ? null : endpoint.meta);
         if (endpoint.meta && (endpoint.meta.id ?? endpoint.meta.sessionId) !== endpoint.id) throw Error('Transcript/session ID mismatch');
-        if (endpoint.meta?.cwd && !same(endpoint.meta.cwd, config.cwd)) throw Error('Transcript cwd mismatch');
+        if (endpoint.meta?.cwd && !await samePath(endpoint.meta.cwd, config.cwd)) throw Error('Transcript cwd mismatch');
         return read;
       }
       const decisions = await processCache.decisions(config.stateDir);
