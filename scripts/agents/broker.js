@@ -10,7 +10,7 @@
 // через `codex app-server proxy`, config.toml не меняется, настройки идут параметрами потока.
 'use strict';
 const { spawn } = require('node:child_process');
-const { connectProxy } = require('../../src/agents/codex-client');
+const { connectProxy, sandboxError } = require('../../src/agents/codex-client');
 const { plain } = require('../../src/agents/codex-path');
 const { syncThreads } = require('../../src/agents/sync-protection');
 const fs = require('node:fs');
@@ -107,8 +107,12 @@ if (state.orchestrator) {
 save();
 const log = (s) => fs.appendFileSync(`${base}.log`, `[${new Date().toISOString()}] ${s}\n`);
 const writeEvent = eventWriter(base, opt.name);
-const delivery = state.orchestrator ? require('../../src/agents/mesh-owner').connectOwner({ owner: state.orchestrator, env: process.env, spawn, log,
-  onError: error => writeEvent('error', { source: 'owner', message: error.message }, { summary: error.message }) }) : null;
+const sandboxFailure = (opt.agent === 'codex' || state.orchestrator?.agent === 'codex') && sandboxError(process.env);
+const delivery = !sandboxFailure && state.orchestrator ? require('../../src/agents/mesh-owner').connectOwner({ owner: state.orchestrator, env: process.env, spawn, log,
+  onError: error => {
+    writeEvent('error', { source: 'owner', message: error.message }, { summary: error.message });
+    if (error.code === 'CODEX_SANDBOX') { log(error.message); console.error(error.message); void done('error', 1); }
+  } }) : null;
 const emit = (...args) => {
   const event = writeEvent(...args);
   delivery?.deliver(event, path.dirname(base));
@@ -152,7 +156,10 @@ const done = (status, code = 0, reason = status === 'error' ? 'error' : 'exit') 
   else process.exit(code);
 };
 
-if (opt.agent === 'codex') runCodex();
+if (sandboxFailure) {
+  emit('error', { source: 'transport', message: sandboxFailure.message, retriable: false }, { summary: sandboxFailure.message });
+  log(sandboxFailure.message); console.error(sandboxFailure.message); void done('error', 1);
+} else if (opt.agent === 'codex') runCodex();
 else if (opt.agent === 'kimi' && opt.kimiPrint) runKimi();
 else if (['kimi', 'claude'].includes(opt.agent)) runInteractive();
 else throw new Error(`unknown agent ${opt.agent}`);
@@ -234,6 +241,11 @@ function runCodex() {
       onDisconnect: why => {
         clearInterval(c.ticker); log(`connection lost: ${why}`);
         invalidate('disconnected', c);
+        const error = sandboxError(process.env, why);
+        if (!closing && error) {
+          emit('error', { source: 'transport', message: error.message, retriable: false }, { turnId, summary: error.message });
+          log(error.message); console.error(error.message); void done('error', 1); return;
+        }
         if (!closing) emit('error', { source: 'transport', message: why, retriable: true }, { turnId, summary: why });
         if (!closing) reconnect();
       } });

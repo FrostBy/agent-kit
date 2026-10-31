@@ -64,6 +64,39 @@ function meshCommand(f, type, payload = {}) {
   f.intervals[0]();
 }
 
+test('missing Codex home exits with a sandbox error before spawning any proxy', async t => {
+  for (const agent of ['codex', 'kimi']) {
+    const f = fixture(t, agent);
+    delete f.processMock.env.HOME; delete f.processMock.env.USERPROFILE;
+    if (agent === 'kimi') f.processMock.env.CODEX_THREAD_ID = 'owner';
+    f.run(); await settle();
+    assert.equal(f.children.length, 0); assert.deepEqual(f.exits, [1]);
+    assert.equal(f.state().status, 'error'); assert.equal(f.timers.length, 0);
+    const error = meshEvents(f).find(e => e.type === 'error');
+    assert.equal(error.payload.retriable, false);
+    assert.match(error.summary, /песочнице Codex.*require_escalated.*Start-Process/);
+    assert(!meshEvents(f).some(e => /embedded TUI/.test(e.summary)));
+  }
+});
+
+test('home failure from either proxy exits without reconnecting or embedded-TUI advice', async t => {
+  for (const owner of [false, true]) {
+    const f = fixture(t, 'codex');
+    if (owner) f.processMock.env.CODEX_THREAD_ID = 'owner';
+    f.run();
+    const child = f.children[0].child;
+    child.stderr.write('Error: Could not find home ');
+    child.stderr.write('directory\n');
+    child.emit('exit', 1);
+    await settle();
+    assert.deepEqual(f.exits, [1]); assert.equal(f.state().status, 'error');
+    assert.equal(f.timers.length, 0);
+    assert(meshEvents(f).some(e => e.type === 'error' && /песочнице Codex.*require_escalated.*Start-Process/.test(e.summary)));
+    assert(!meshEvents(f).some(e => /embedded TUI/.test(e.summary)));
+    assert(!fs.readFileSync(path.join(f.root, 'worker.log'), 'utf8').includes('reconnect in'));
+  }
+});
+
 test('Codex holds server questions, validates answers and replies on the original typed RPC ID', async t => {
   const f = fixture(t, 'codex'); f.run(); await settle();
   const child = f.children[0].child;

@@ -2,6 +2,12 @@
 const { spawn: defaultSpawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 
+function sandboxError(env, message = '') {
+  if ((!env.USERPROFILE && !env.HOME) || /Could not find home directory/i.test(message)) {
+    return Object.assign(Error('брокер запущен в песочнице Codex; запускайте вне песочницы (require_escalated) через Start-Process'), { code: 'CODEX_SANDBOX' });
+  }
+}
+
 // Shared transport for the broker and its archive command; proxy speaks WebSocket over stdio.
 function connectProxy({ env = process.env, spawn = defaultSpawn, mode = 'proxy', log = () => {}, onNotification = () => {}, onRequest, onDisconnect = () => {}, timeout = 90000 } = {}) {
   const stdio = mode === 'stdio';
@@ -75,7 +81,12 @@ function connectProxy({ env = process.env, spawn = defaultSpawn, mode = 'proxy',
   proc.on('error', e => lost(`spawn error ${e.message}`));
   proc.on('exit', code => lost(`proxy exit ${code}`));
   proc.stdin.on?.('error', e => lost(`proxy stdin ${e.message}`));
-  proc.stderr.on('data', data => log(`proxy stderr ${String(data).trim().slice(0, 300)}`));
+  let stderr = '';
+  proc.stderr.on('data', data => {
+    log(`proxy stderr ${String(data).trim().slice(0, 300)}`);
+    stderr = (stderr + String(data)).slice(-1024);
+    if (/Could not find home directory/i.test(stderr)) lost('Could not find home directory');
+  });
   proc.stdout.on('data', data => {
     raw = Buffer.concat([raw, data]);
     if (stdio) {
@@ -108,4 +119,4 @@ function connectProxy({ env = process.env, spawn = defaultSpawn, mode = 'proxy',
     lost,
   };
 }
-module.exports = { connectProxy };
+module.exports = { connectProxy, sandboxError };

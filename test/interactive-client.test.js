@@ -114,6 +114,28 @@ test('embedded Codex and terminal Kimi report explicit unsupported-owner errors'
   }
 });
 
+test('Codex owner reports home and transport failures without claiming the thread is missing', async () => {
+  for (const reason of [null, 'Could not find home directory', 'proxy exit 1']) {
+    const errors = [], calls = [];
+    let disconnect;
+    const owner = connectOwner({ owner: { agent: 'codex', id: 'owner' }, env: reason ? { HOME: '/fixture' } : {},
+      onError: error => errors.push(error), connect(options) {
+        disconnect = options.onDisconnect;
+        return { ready: Promise.resolve(), notify() {}, close() {}, async request(method) {
+          calls.push(method);
+          return method === 'thread/loaded/list' ? { data: ['owner'] } : {};
+        } };
+      } });
+    if (reason) { await owner.ready; disconnect(reason); }
+    else { await assert.rejects(owner.ready, { code: 'CODEX_SANDBOX' }); assert.equal(calls.length, 0); }
+    assert.equal(errors.length, 1);
+    assert.doesNotMatch(errors[0].message, /not loaded|embedded TUI/);
+    if (reason !== 'proxy exit 1') assert.match(errors[0].message, /песочнице Codex.*require_escalated.*Start-Process/);
+    else assert.match(errors[0].message, /proxy exit 1/);
+    owner.close();
+  }
+});
+
 test('Kimi owner must be live in this web server; cold sessions are never adopted by POST', async t => {
   const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-web-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

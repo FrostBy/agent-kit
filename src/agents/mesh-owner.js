@@ -1,5 +1,5 @@
 'use strict';
-const { connectProxy } = require('./codex-client');
+const { connectProxy, sandboxError } = require('./codex-client');
 const { formatEvent, ackDelivered } = require('./mesh');
 
 const codexHelp = 'Codex owner is not loaded on the shared daemon. Start the orchestrator TUI on that daemon (codex --remote), then launch the broker there with CODEX_THREAD_ID inherited; an embedded TUI cannot receive mesh wake.';
@@ -8,8 +8,10 @@ function connectOwner({ owner, env = process.env, spawn, log = () => {}, onError
   let conn, closed = false, failed = false, chain = Promise.resolve();
   const ready = (async () => {
     if (owner.agent === 'codex') {
+      const error = sandboxError(env);
+      if (error) throw error;
       // This observer must never claim or reject the orchestrator's server requests.
-      conn = connect({ env, spawn, log, onRequest() {}, onDisconnect: reason => { if (!closed) report(Error(`Codex owner disconnected: ${reason}. ${codexHelp}`)); } });
+      conn = connect({ env, spawn, log, onRequest() {}, onDisconnect: reason => { if (!closed) report(sandboxError(env, reason) || Error(`Codex owner disconnected: ${reason}`)); } });
       await conn.ready;
       await conn.request('initialize', { clientInfo: { name: 'agent-kit-mesh-owner', version: '0.5.5' } });
       conn.notify('initialized', {});
