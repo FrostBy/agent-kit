@@ -4,7 +4,7 @@ diff --git a/codex-rs/tui/src/app/tests/permission_selection_tests.rs b/codex-rs
 @@ -3,6 +3,83 @@
  use super::*;
  use pretty_assertions::assert_eq;
- 
+
 +#[tokio::test]
 +async fn shift_tab_full_access_reaches_app_server() -> Result<()> {
 +    boxed_future!(async {
@@ -111,7 +111,7 @@ diff --git a/codex-rs/tui/src/chatwidget/interaction.rs b/codex-rs/tui/src/chatw
 --- a/codex-rs/tui/src/chatwidget/interaction.rs
 +++ b/codex-rs/tui/src/chatwidget/interaction.rs
 @@ -290,17 +290,18 @@ impl ChatWidget {
- 
+
          match key_event {
              KeyEvent {
 -                code: KeyCode::BackTab,
@@ -136,10 +136,10 @@ diff --git a/codex-rs/tui/src/chatwidget/interaction.rs b/codex-rs/tui/src/chatw
 diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidget/settings.rs
 --- a/codex-rs/tui/src/chatwidget/settings.rs
 +++ b/codex-rs/tui/src/chatwidget/settings.rs
-@@ -696,6 +696,111 @@ impl ChatWidget {
+@@ -696,6 +696,117 @@ impl ChatWidget {
          self.update_collaboration_mode_indicator();
      }
- 
+
 +    pub(super) fn status_line_mode(&self) -> &'static str {
 +        if let Some(mode) = self.pending_interaction_mode {
 +            return if mode == ModeKind::Plan { "plan" } else { "auto" };
@@ -180,7 +180,7 @@ diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidg
 +    }
 +
 +    pub(super) fn apply_interaction_mode(&mut self, target: ModeKind) {
-+        let Some(mask) = collaboration_modes::mask_for_kind(self.model_catalog.as_ref(), target)
++        let Some(mut mask) = collaboration_modes::mask_for_kind(self.model_catalog.as_ref(), target)
 +        else {
 +            return;
 +        };
@@ -214,7 +214,13 @@ diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidg
 +        self.config.permissions = permissions;
 +        self.set_approvals_reviewer(ApprovalsReviewer::User);
 +        self.status_line_command.last_requested_at = None;
-+        self.set_collaboration_mask(mask);
++        // Shift+Tab keeps runtime choices instead of applying the Plan preset/config override.
++        mask.model = Some(self.current_model().to_string());
++        mask.reasoning_effort = Some(self.effective_reasoning_effort());
++        self.active_collaboration_mask = Some(mask);
++        self.update_collaboration_mode_indicator();
++        self.refresh_model_dependent_surfaces();
++        self.request_redraw();
 +        // Send permissions and mode together; local state is already optimistic.
 +        if let Some(thread_id) = self.thread_id {
 +            self.app_event_tx.send(AppEvent::SubmitThreadOp {
@@ -273,7 +279,7 @@ diff --git a/codex-rs/tui/src/chatwidget/status_line_command_tests.rs b/codex-rs
 @@ -57,6 +57,105 @@ async fn windows_command_timeout_is_bounded() {
      assert!(started.elapsed() < Duration::from_secs(2));
  }
- 
+
 +#[tokio::test]
 +async fn shift_tab_updates_interaction_mode_payload() {
 +    for key in [
@@ -382,7 +388,7 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/app_server.rs b/codex-rs/tui/src/
 @@ -44,6 +44,77 @@ fn thread_settings_for_test(
      }
  }
- 
+
 +#[tokio::test]
 +async fn shift_tab_full_access_survives_thread_settings_updated() {
 +    for reviewer in [ApprovalsReviewer::User, ApprovalsReviewer::AutoReview] {
@@ -460,9 +466,9 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/app_server.rs b/codex-rs/tui/src/
 diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
 --- a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
-@@ -1320,22 +1320,90 @@ async fn enter_submits_when_plan_stream_is_not_active() {
+@@ -1320,22 +1320,159 @@ async fn enter_submits_when_plan_stream_is_not_active() {
  }
- 
+
  #[tokio::test]
 -async fn collab_mode_shift_tab_cycles_only_when_idle() {
 -    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -471,10 +477,78 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/c
 -    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
 -    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
 -    assert_eq!(chat.current_collaboration_mode(), &initial);
--
++async fn shift_tab_preserves_runtime_model_and_effort() {
++    for running in [false, true] {
++        for plan_effort in [None, Some(ReasoningEffortConfig::Low)] {
++            for key in [
++                KeyEvent::from(KeyCode::BackTab),
++                KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
++            ] {
++                let (mut chat, mut events, _operations) = make_chatwidget_manual(None).await;
++                chat.thread_id = Some(ThreadId::new());
++                chat.set_model("gpt-5.6-luna");
++                chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
++                chat.set_plan_mode_reasoning_effort(plan_effort.clone());
++                let _ = drain_insert_history(&mut events);
++
++                for expected in [ModeKind::Plan, ModeKind::Default] {
++                    if running {
++                        chat.on_task_started();
++                    }
++                    chat.handle_key_event(key);
++                    assert_eq!(chat.current_model(), "gpt-5.6-luna");
++                    assert_eq!(
++                        chat.current_reasoning_effort(),
++                        Some(ReasoningEffortConfig::High)
++                    );
++                    if running {
++                        assert_eq!(chat.pending_interaction_mode, Some(expected));
++                        chat.on_task_complete(None, None, false);
++                    }
++                    assert_eq!(chat.active_mode_kind(), expected);
++                    assert_eq!(chat.current_model(), "gpt-5.6-luna");
++                    assert_eq!(
++                        chat.current_reasoning_effort(),
++                        Some(ReasoningEffortConfig::High)
++                    );
++                    assert_eq!(chat.config.plan_mode_reasoning_effort, plan_effort);
++                    let mut updates = 0;
++                    while let Ok(event) = events.try_recv() {
++                        match event {
++                            AppEvent::SubmitThreadOp {
++                                op:
++                                    AppCommand::OverrideTurnContext {
++                                        collaboration_mode: Some(mode),
++                                        ..
++                                    },
++                                ..
++                            } => {
++                                updates += 1;
++                                assert_eq!(mode.mode, expected);
++                                assert_eq!(mode.model(), "gpt-5.6-luna");
++                                assert_eq!(
++                                    mode.reasoning_effort(),
++                                    Some(ReasoningEffortConfig::High)
++                                );
++                            }
++                            AppEvent::InsertHistoryCell(cell) => {
++                                let text = lines_to_single_string(&cell.display_lines(120));
++                                assert!(!text.contains("Model changed"), "{text}");
++                            }
++                            _ => {}
++                        }
++                    }
++                    assert_eq!(updates, 1);
++                }
++            }
++        }
++    }
++}
+
 -    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
 -    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
 -    assert_eq!(chat.current_collaboration_mode(), &initial);
++#[tokio::test]
 +async fn shift_tab_defers_only_the_latest_choice_until_turn_finishes() {
 +    for completed in [false, true] {
 +        for key in [KeyEvent::from(KeyCode::BackTab), KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)] {
@@ -564,7 +638,7 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/c
 +        }
 +    }
  }
- 
+
  #[tokio::test]
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
