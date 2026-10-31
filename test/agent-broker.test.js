@@ -33,9 +33,10 @@ function fixture(t, agent) {
         msg = JSON.parse(payload.toString());
       }
       requests.push(msg);
-      if (msg.id === undefined) return;
+      if (msg.id === undefined || !msg.method) return;
       const result = msg.method === 'thread/start' ? { thread: { id: 'thread-fixture' }, model: 'fixture-model' } : msg.method === 'turn/start' ? { turn: { id: 'turn-fixture' } } : {};
       const response = answers[msg.method] ? answers[msg.method](msg) : { result };
+      if (response === null) return;
       queueMicrotask(() => send({ id: msg.id, ...response }));
     } };
     function send(msg) {
@@ -51,9 +52,120 @@ function fixture(t, agent) {
     setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {} };
   const run = () => vm.runInNewContext(source, context, { filename: 'broker.js' });
   const state = () => JSON.parse(fs.readFileSync(path.join(root, 'worker.state.json'), 'utf8'));
-  return { root, run, state, processMock, children, requests, intervals, timers, answers, exits, spawn };
+  return { root, run, state, processMock, children, requests, intervals, timers, answers, exits, spawn, context };
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+const meshEvents = f => fs.readFileSync(path.join(f.root, 'worker.events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+let commandNumber = 0;
+function meshCommand(f, type, payload = {}) {
+  fs.writeFileSync(path.join(f.root, 'worker.inbox', `${++commandNumber}.command.json`), JSON.stringify({ v: 1, id: `test-${commandNumber}`, type, payload }));
+  f.intervals[0]();
+}
+
+test('Codex holds server questions, validates answers and replies on the original typed RPC ID', async t => {
+  const f = fixture(t, 'codex'); f.run(); await settle();
+  const child = f.children[0].child;
+  const params = { threadId: 'thread-fixture', turnId: 'turn-fixture', itemId: 'item', isBlocking: true,
+    questions: [{ id: 'choice', question: 'Which route?', options: [{ label: 'A' }, { label: 'B' }] }] };
+  child.send({ id: 77, method: 'item/tool/requestUserInput', params });
+  child.send({ id: 77, method: 'item/tool/requestUserInput', params });
+  child.send({ id: '77', method: 'item/tool/requestUserInput', params });
+  await settle();
+  const questions = meshEvents(f).filter(e => e.type === 'question');
+  assert.equal(questions.length, 2); assert.equal(f.state().status, 'running');
+  assert.equal(f.requests.filter(r => !r.method).length, 0);
+  assert.equal(questions[0].payload.isBlocking, true);
+  meshCommand(f, 'answer', { requestId: questions[0].requestId, text: 'invalid' }); await settle();
+  assert.equal(f.requests.filter(r => !r.method).length, 0);
+  assert.match(meshEvents(f).at(-1).summary, /Unknown option/);
+  meshCommand(f, 'answer', { requestId: questions[0].requestId, text: 'A' }); await settle();
+  assert.deepEqual(f.requests.find(r => r.id === 77 && !r.method), { jsonrpc: '2.0', id: 77, result: { answers: { choice: { answers: ['A'] } } } });
+  meshCommand(f, 'answer', { requestId: questions[1].requestId, result: { answers: { choice: { answers: ['B'] } } } }); await settle();
+  assert.equal(f.requests.find(r => r.id === '77' && !r.method).result.answers.choice.answers[0], 'B');
+  meshCommand(f, 'answer', { requestId: questions[0].requestId, text: 'B' }); await settle();
+  assert.match(meshEvents(f).at(-1).summary, /Stale or resolved/);
+  assert.equal(f.requests.filter(r => !r.method).length, 2);
+  assert.equal(f.requests.filter(r => r.method === 'turn/start').length, 1);
+  assert.equal(f.requests.filter(r => r.method === 'turn/steer').length, 0);
+  assert.deepEqual(f.state().pendingRequests, []);
+});
+
+test('approval policy is opt-in and approve/deny use command, file and permissions response schemas', async t => {
+  const f = fixture(t, 'codex'); f.processMock.argv.push('--approval-policy', 'on-request'); f.run(); await settle();
+  assert.equal(f.requests.find(r => r.method === 'thread/start').params.approvalPolicy, 'on-request');
+  const child = f.children[0].child;
+  for (const kind of ['commandExecution', 'fileChange', 'permissions']) for (const type of ['approve', 'deny']) {
+    const id = `${kind}-${type}`, permissions = { network: { enabled: true }, fileSystem: { write: ['/fixture'] } };
+    child.send({ id, method: `item/${kind}/requestApproval`, params: { threadId: 'thread-fixture', turnId: 'turn-fixture', reason: 'fixture approval', permissions, availableDecisions: ['accept', 'decline'] } });
+    await settle(); assert(!f.requests.some(r => r.id === id && !r.method));
+    const event = meshEvents(f).at(-1); assert.equal(event.type, 'approval');
+    meshCommand(f, type, { requestId: event.requestId }); await settle();
+    assert.deepEqual(f.requests.find(r => r.id === id && !r.method).result, kind === 'permissions'
+      ? { permissions: type === 'approve' ? permissions : {}, scope: 'turn' } : { decision: type === 'approve' ? 'accept' : 'decline' });
+  }
+  child.send({ id: 'limited', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-fixture', availableDecisions: ['cancel'] } });
+  await settle(); meshCommand(f, 'approve', { requestId: meshEvents(f).at(-1).requestId }); await settle();
+  assert.match(meshEvents(f).at(-1).summary, /not available/);
+  assert(!f.requests.some(r => r.id === 'limited' && !r.method));
+});
+
+test('server resolution, interrupt, completion and disconnect invalidate requests, including reused wire IDs', async t => {
+  for (const action of ['resolved', 'interrupt', 'completed', 'disconnect']) {
+    const f = fixture(t, 'codex'); f.run(); await settle();
+    let child = f.children[0].child;
+    const question = () => child.send({ id: 81, method: 'item/tool/requestUserInput', params: { threadId: 'thread-fixture', turnId: 'turn-fixture',
+      isBlocking: false, questions: [{ id: 'q', question: 'Question' }] } });
+    question(); await settle(); const id = meshEvents(f).at(-1).requestId;
+    if (action === 'resolved') child.send({ method: 'serverRequest/resolved', params: { threadId: 'thread-fixture', requestId: 81 } });
+    if (action === 'interrupt') meshCommand(f, 'interrupt');
+    if (action === 'completed') child.send({ method: 'turn/completed', params: { turn: { id: 'turn-fixture', status: 'completed' } } });
+    if (action === 'disconnect') child.emit('exit', 1);
+    await settle(); assert(meshEvents(f).some(e => e.type === 'request.resolved' && e.requestId === id));
+    if (action === 'disconnect') { f.timers.at(-1)(); await settle(); child = f.children.at(-1).child; question(); await settle(); }
+    meshCommand(f, 'answer', { requestId: id, text: 'late answer' }); await settle();
+    assert.match(meshEvents(f).at(-1).summary, /Stale or resolved/);
+    assert(!f.requests.some(r => r.id === 81 && !r.method));
+    if (action === 'disconnect') {
+      const fresh = meshEvents(f).findLast(e => e.type === 'question'); assert.notEqual(fresh.requestId, id);
+      meshCommand(f, 'answer', { requestId: fresh.requestId, text: 'current answer' }); await settle();
+      assert.equal(f.requests.find(r => r.id === 81 && !r.method).result.answers.q.answers[0], 'current answer');
+    } else {
+      const before = meshEvents(f).filter(e => e.type === 'question').length;
+      question(); await settle(); assert.equal(meshEvents(f).filter(e => e.type === 'question').length, before);
+    }
+  }
+});
+
+test('typed decisions and exit are serviced while turn/steer is still awaiting its RPC response', async t => {
+  const f = fixture(t, 'codex'); f.run(); await settle();
+  f.answers['turn/steer'] = () => null;
+  fs.writeFileSync(path.join(f.root, 'worker.inbox', 'message'), 'steer'); f.intervals[0](); await settle();
+  const steer = f.requests.find(r => r.method === 'turn/steer'); assert(steer);
+  const child = f.children[0].child;
+  child.send({ id: 'held', method: 'item/tool/requestUserInput', params: { threadId: 'thread-fixture', turnId: 'turn-fixture', questions: [{ id: 'q', question: 'Continue?' }] } });
+  await settle(); meshCommand(f, 'answer', { requestId: meshEvents(f).at(-1).requestId, text: 'yes' }); await settle();
+  assert.equal(f.requests.find(r => r.id === 'held' && !r.method).result.answers.q.answers[0], 'yes');
+  meshCommand(f, 'exit'); await settle(); assert.deepEqual(f.exits, [0]);
+  assert.equal(meshEvents(f).at(-1).type, 'agent.exited');
+});
+
+test('shared transport keeps unsupported requests at -32601, holds callbacks without a timer, and responds with errors', async () => {
+  const { connectProxy } = require('../src/agents/codex-client');
+  for (const callback of [false, true]) {
+    let child, incoming; const writes = [];
+    const client = connectProxy({ mode: 'stdio', timeout: 10, ...(callback ? { onRequest: msg => { incoming = msg; } } : {}), spawn() {
+      child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough(); child.kill = () => {};
+      child.stdin.on('data', bytes => writes.push(JSON.parse(String(bytes)))); return child;
+    } });
+    await client.ready;
+    child.stdout.write(JSON.stringify({ id: 'server-1', method: 'test', params: {} }) + '\n');
+    await new Promise(r => setTimeout(r, 25)); assert.equal(client.alive, true);
+    if (callback) { assert.equal(incoming.id, 'server-1'); assert.equal(writes.length, 0); client.respond(incoming.id, { code: -32602, message: 'bad answer' }); }
+    assert.equal(writes.length, 1); assert.equal(writes[0].id, 'server-1'); assert.equal(writes[0].error.code, callback ? -32602 : -32601);
+    client.close(); assert.throws(() => client.respond('late', {}), /disconnected/);
+  }
+});
 
 test('Codex broker keeps state format and exclusion policy; turns, inbox steering and reconnect use the same thread', async t => {
   const f = fixture(t, 'codex'); f.run(); await settle();
@@ -70,6 +182,7 @@ test('Codex broker keeps state format and exclusion policy; turns, inbox steerin
   child.send({ method: 'item/completed', params: { threadId: 'thread-fixture', item: { type: 'agentMessage', text: 'fixture answer' } } });
   child.send({ method: 'turn/completed', params: { threadId: 'thread-fixture', turn: { id: 'turn-fixture', status: 'completed' } } });
   await settle(); assert.equal(f.state().status, 'idle'); assert.equal(f.state().turns, 1);
+  assert.ok(f.state().lastTurnAt);
   assert.equal(fs.readFileSync(path.join(f.root, 'worker.out.md'), 'utf8'), 'fixture answer');
   child.emit('exit', 1); assert.equal(f.state().status, 'reconnecting');
   f.timers.at(-1)(); await settle();
@@ -285,8 +398,7 @@ test('archive excludes poisoned mirror IDs and rechecks registries immediately b
   assert(!f.requests.some(r => r.method === 'thread/archive' && ['mirror', 'racing'].includes(r.params.threadId)));
 });
 
-test('archive CLI accepts repeated Claude profile options and dry-run never starts app-server', t => {
-  const f = fixture(t, 'codex'), dirs = ['one', 'two'].map(name => path.join(f.root, name));
+test('archive CLI accepts repeated Claude profile options and dry-run never starts app-server', t => {  const f = fixture(t, 'codex'), dirs = ['one', 'two'].map(name => path.join(f.root, name));
   for (const [n, profile] of dirs.entries()) {
     const folder = path.join(profile, 'agent-kit', 'sync', 'project'); fs.mkdirSync(folder, { recursive: true });
     fs.writeFileSync(path.join(folder, 'pairs.json'), JSON.stringify({ version: 2, pairs: [{ id: 'pair', codex: { id: 'mirror-' + n } }] }));
@@ -297,4 +409,175 @@ test('archive CLI accepts repeated Claude profile options and dry-run never star
   });
   assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /Protected sync thread: mirror-0/); assert.match(result.stdout, /Protected sync thread: mirror-1/);
   assert.match(result.stdout, /dry-run, no app-server connection/);
+});
+
+test('send puts the message into the inbox and prints the finished turn output', async t => {
+  const { spawn, spawnSync } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-kit-send-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'worker.inbox'));
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'codex', status: 'idle', turns: 1, pid: process.pid }));
+  const script = path.resolve(__dirname, '../scripts/agents/broker.js');
+  const env = { ...process.env, BROKER_POLL_MS: '50' };
+  const child = spawn(process.execPath, [script, 'send', '--name', 'worker', '--state', root, '--text', 'hello agent', '--timeout-min', '1'], { env });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (d) => { stdout += d; }); child.stderr.on('data', (d) => { stderr += d; });
+  // Подмена брокера: забираем письмо из inbox, «завершаем» ход с ростом turns.
+  let letter = null;
+  for (let i = 0; i < 200 && !letter; i++) {
+    await new Promise(r => setTimeout(r, 10));
+    letter = fs.readdirSync(path.join(root, 'worker.inbox')).find((f) => !f.startsWith('.'));
+  }
+  assert.ok(letter, 'send did not drop the message into the inbox');
+  assert.match(letter, /^\d{15}-\d+$/);
+  assert.equal(fs.readFileSync(path.join(root, 'worker.inbox', letter), 'utf8'), 'hello agent');
+  fs.writeFileSync(path.join(root, 'worker.out.md'), 'turn result');
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'codex', status: 'idle', turns: 2, lastTurnAt: new Date().toISOString(), pid: process.pid }));
+  const code = await new Promise(r => child.on('exit', r));
+  assert.equal(code, 0, stderr); assert.equal(stdout, 'turn result');
+  // --message FILE - тот же путь к письму.
+  const message = path.join(root, 'msg.md'); fs.writeFileSync(message, 'from file');
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'kimi', status: 'idle', turns: 2, pid: process.pid }));
+  const again = spawn(process.execPath, [script, 'send', '--name', 'worker', '--state', root, '--message', message, '--timeout-min', '1'], { env });
+  const letter2 = await new Promise((resolve) => {
+    const poll = setInterval(() => {
+      const found = fs.readdirSync(path.join(root, 'worker.inbox')).filter((f) => !f.startsWith('.'));
+      if (found.length > 1) { clearInterval(poll); resolve(found.find((f) => f !== letter)); }
+    }, 10);
+  });
+  assert.equal(fs.readFileSync(path.join(root, 'worker.inbox', letter2), 'utf8'), 'from file');
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'kimi', status: 'idle', turns: 3, pid: process.pid }));
+  assert.equal(await new Promise(r => again.on('exit', r)), 0);
+});
+
+test('send and wait count an errored finished turn as turn completion', async t => {
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-kit-send-error-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'worker.inbox'));
+  const script = path.resolve(__dirname, '../scripts/agents/broker.js');
+  const env = { ...process.env, BROKER_POLL_MS: '50' };
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'codex', status: 'idle', turns: 1, pid: process.pid }));
+  const child = spawn(process.execPath, [script, 'send', '--name', 'worker', '--state', root, '--text', 'x', '--timeout-min', '1'], { env });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (d) => { stdout += d; }); child.stderr.on('data', (d) => { stderr += d; });
+  let letter = null;
+  for (let i = 0; i < 200 && !letter; i++) {
+    await new Promise(r => setTimeout(r, 10));
+    letter = fs.readdirSync(path.join(root, 'worker.inbox')).find((f) => !f.startsWith('.'));
+  }
+  assert.ok(letter);
+  // Ход завершился с ошибкой - turns вырос, status error: send всё равно печатает out.md.
+  fs.writeFileSync(path.join(root, 'worker.out.md'), 'error report');
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'codex', status: 'error', turns: 2, pid: process.pid }));
+  const code = await new Promise(r => child.on('exit', r));
+  assert.equal(code, 0, stderr); assert.equal(stdout, 'error report');
+  // wait на статусе running дождётся конца текущего хода.
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'kimi', status: 'running', turns: 2, pid: process.pid }));
+  const waiter = spawn(process.execPath, [script, 'wait', '--name', 'worker', '--state', root, '--timeout-min', '1'], { env });
+  let waitOut = '';
+  waiter.stdout.on('data', (d) => { waitOut += d; });
+  await new Promise(r => setTimeout(r, 150));
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'kimi', status: 'idle', turns: 3, pid: process.pid }));
+  assert.equal(await new Promise(r => waiter.on('exit', r)), 0);
+  assert.equal(waitOut, 'error report');
+});
+
+test('send and wait exit 1 with a clear message on a dead broker pid or turn timeout', async t => {
+  const { spawnSync } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-kit-send-dead-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const script = path.resolve(__dirname, '../scripts/agents/broker.js');
+  const env = { ...process.env, BROKER_POLL_MS: '20' };
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'codex', status: 'idle', turns: 3, pid: 999999999 }));
+  for (const mode of ['wait', 'send']) {
+    const args = [script, mode, '--name', 'worker', '--state', root];
+    if (mode === 'send') args.push('--text', 'x');
+    const r = spawnSync(process.execPath, args, { env, encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stderr); assert.match(r.stderr, /не жив/);
+  }
+  fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'kimi', status: 'running', turns: 0, pid: process.pid }));
+  const r = spawnSync(process.execPath, [script, 'wait', '--name', 'worker', '--state', root, '--timeout-min', '0.0005'], { env, encoding: 'utf8' });
+  assert.equal(r.status, 1); assert.match(r.stderr, /таймаут/);
+});
+
+test('idle defaults to 15 minutes, preserves overrides and emits an idle exit for both agents', async t => {
+  for (const agent of ['codex', 'kimi']) for (const idleMin of [undefined, 2]) {
+    const f = fixture(t, agent); let now = Date.now();
+    f.context.Date = class extends Date { static now() { return now; } };
+    if (idleMin) f.processMock.argv.push('--idle-min', String(idleMin));
+    f.run(); await settle();
+    if (agent === 'codex') f.children[0].child.send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
+    else f.children[0].child.emit('exit', 0);
+    await settle(); assert.equal(f.state().launch.idleMin, idleMin ?? 15);
+    now += (idleMin ?? 15) * 60000 + 1;
+    if (agent === 'codex') f.intervals[0](); else f.timers.at(-1)();
+    await settle(); assert.deepEqual(f.exits, [0]);
+    assert.equal(meshEvents(f).at(-1).payload.reason, 'idle');
+  }
+});
+
+test('send revives detached Codex/Kimi with saved settings and delivers only the new turn', async t => {
+  for (const agent of ['codex', 'kimi']) {
+    const f = fixture(t, agent), stateFile = path.join(f.root, 'worker.state.json');
+    const launch = { agent, cwd: f.root, model: 'saved-model', effort: 'high', sandbox: 'read-only', approvalPolicy: 'on-request', network: true, search: true, idleMin: 3 };
+    fs.writeFileSync(stateFile, JSON.stringify({ agent, pid: 999999999, status: 'done', turns: 4, threadId: agent === 'codex' ? 'thread-saved' : undefined,
+      sessionId: agent === 'kimi' ? 'session_saved' : undefined, turnId: 'old-turn', launch }));
+    const stale = require('../src/agents/mesh').eventWriter(path.join(f.root, 'worker'), 'worker')('question', {}, { requestId: 'stale' });
+    let output = '', spawned;
+    let exitResolve; const exited = new Promise(resolve => { exitResolve = resolve; });
+    const sendProcess = { env: { BROKER_POLL_MS: '1' }, pid: 555, execPath: process.execPath,
+      argv: ['node', 'broker.js', 'send', '--name', 'worker', '--state', f.root, '--text', 'new message', '--timeout-min', '0.01'],
+      stdout: { write: text => { output += text; } }, exit(code) { exitResolve(code); throw Error('test exit'); } };
+    vm.runInNewContext(source, { require: name => name === 'node:child_process' ? { spawn(command, args, options) {
+      spawned = { command, args, options }; assert.equal(options.detached, true); assert.equal(options.windowsHide, true); assert.equal(options.stdio, 'ignore');
+      assert(!args.includes('--prompt')); assert(args.includes('--resume'));
+      f.processMock.pid = process.pid; f.processMock.argv = ['node', ...args]; f.run();
+      return Object.assign(new EventEmitter(), { pid: process.pid, unref() {} });
+    } } : require(name.startsWith('.') ? path.resolve(__dirname, '../scripts/agents', name) : name),
+    process: sendProcess, __filename: path.resolve(__dirname, '../scripts/agents/broker.js'), console: { error() {} }, Buffer });
+    await settle(); assert(spawned);
+    if (agent === 'codex') {
+      const resume = f.requests.find(r => r.method === 'thread/resume'); assert.equal(resume.params.threadId, 'thread-saved');
+      assert.equal(resume.params.model, 'saved-model'); assert.equal(resume.params.approvalPolicy, 'on-request');
+      assert.equal(resume.params.sandbox, 'read-only'); assert.equal(resume.params.config.web_search, 'live');
+      const turns = f.requests.filter(r => r.method === 'turn/start'); assert.equal(turns.length, 1);
+      assert.equal(turns[0].params.input[0].text, 'new message'); assert.equal(turns[0].params.effort, 'high');
+      assert(!f.requests.some(r => r.method === 'turn/steer' || r.method === 'thread/start'));
+      f.children[0].child.send({ method: 'item/completed', params: { item: { type: 'agentMessage', text: 'resumed result' } } });
+      f.children[0].child.send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
+    } else {
+      f.timers.at(-1)(); await settle();
+      assert.equal(f.children.length, 1);
+      assert.deepEqual(Array.from(f.children[0].args), ['-m', 'saved-model', '-S', 'session_saved', '-p', 'new message']);
+      f.children[0].child.stdout.write('resumed result'); f.children[0].child.emit('exit', 0);
+    }
+    assert.equal(await exited, 0); assert.equal(output, 'resumed result'); assert.equal(f.state().turns, 5);
+    assert.equal(f.state().launch.idleMin, 3);
+    assert(meshEvents(f).some(e => e.type === 'request.resolved' && e.requestId === stale.requestId));
+  }
+});
+
+test('owner death exits a running broker and SessionEnd exits both running agents', async t => {
+  const { hook } = require('../scripts/agents/mesh-hook');
+  for (const agent of ['codex', 'kimi']) for (const end of ['owner', 'SessionEnd']) {
+    const f = fixture(t, agent), input = { cwd: f.root, session_id: 'owner-session', hook_event_name: 'SessionEnd' };
+    const dir = require('../scripts/agents/mesh-hook').scratchpad(input, f.root);
+    fs.mkdirSync(dir, { recursive: true });
+    const stateArg = f.processMock.argv.indexOf('--state') + 1; f.processMock.argv[stateArg] = dir;
+    const file = path.join(dir, 'worker.state.json');
+    const originalRequire = f.context.require;
+    f.context.require = name => name === 'node:os' ? { tmpdir: () => f.root }
+      : name === '../../src/sync/process-cache' ? { identity: async () => end === 'owner' ? '999999999:created' : null } : originalRequire(name);
+    f.run(); await settle();
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8')); assert.equal(saved.owner, 'owner-session');
+    assert.equal(saved.ownerPid, end === 'owner' ? 999999999 : undefined);
+    if (end === 'SessionEnd') {
+      const state = JSON.parse(fs.readFileSync(file, 'utf8')); state.pid = process.pid; fs.writeFileSync(file, JSON.stringify(state));
+      assert.equal(await hook(input, { env: {}, tmp: f.root }), 0);
+      f.intervals[0]();
+    } else f.intervals.at(-1)();
+    await settle(); assert.deepEqual(f.exits, [0]);
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).status, 'done');
+  }
 });

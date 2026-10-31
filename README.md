@@ -95,11 +95,15 @@ node statusline.js --codex --preview    # sample umbrella with three repositorie
 
 ## Agent broker and session sync (experimental)
 
-**Broker.** Claude runs Codex (through `codex app-server proxy`) or Kimi as background executors, with an inbox for follow-ups, steering and interruption. Point `--state` at the scratchpad the statusline reads. `node install.js --only broker` prints the command; npm also exposes `agent-broker`. Executables come from PATH or `AGENT_BROKER_CODEX` / `AGENT_BROKER_KIMI`. Finished Codex threads are archived and unarchived on resume.
+**Broker.** Claude runs Codex (through `codex app-server proxy`) or Kimi as background executors, with an inbox for follow-ups, steering and interruption. Point `--state` at the scratchpad the statusline reads. `node install.js --only broker` prints the command; npm also exposes `agent-broker`. Executables come from PATH or `AGENT_BROKER_CODEX` / `AGENT_BROKER_KIMI`. Finished Codex threads are archived and unarchived on resume. For orchestrators and background commands: `broker.js send --name X --state DIR (--message FILE | --text "...")` drops a message into the inbox and waits for the turn to finish, `broker.js wait --name X --state DIR` waits for the current or next turn to finish; both print `<name>.out.md` and exit 0 (1 if the broker cannot resume or `--timeout-min` expires).
 
 ```sh
 node scripts/agents/broker.js --agent codex --name reviewer --state /tmp/scratchpad --prompt /tmp/prompt.md --cwd /path/to/project
 ```
+
+Brokers exit after 15 idle minutes (`--idle-min` overrides); `send` revives a dead broker using saved settings and its Codex/Kimi session, without replaying the initial prompt. Mesh hooks ignore normal/idle exits; the synchronous SessionEnd hook closes session brokers, and a detected owner PID also binds their lifetime.
+
+**Interactive mesh (iterations 1–2).** Codex questions and approvals stay open for `broker.js answer|approve|deny --name X --state DIR --request ID`; typed `interrupt`/`exit` also work during a turn. `--approval-policy` defaults to `never`. `events --state DIR --next` waits for one event and advances a cursor so it is not delivered twice. The optional Claude `mesh-hook.js` uses `asyncRewake` on SessionStart/Stop; install it explicitly with `node scripts/agents/mesh-hook.js install` (remove with `uninstall`). See [setup, settings JSON and live acceptance checks](docs/agent-mesh.md#подключение-итераций-1–2). Live idle wake still needs acceptance on your Claude version.
 
 **Session sync** is off by default, including with `--yes`:
 

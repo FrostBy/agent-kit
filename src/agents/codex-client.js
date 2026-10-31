@@ -3,7 +3,7 @@ const { spawn: defaultSpawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 
 // Shared transport for the broker and its archive command; proxy speaks WebSocket over stdio.
-function connectProxy({ env = process.env, spawn = defaultSpawn, mode = 'proxy', log = () => {}, onNotification = () => {}, onDisconnect = () => {}, timeout = 90000 } = {}) {
+function connectProxy({ env = process.env, spawn = defaultSpawn, mode = 'proxy', log = () => {}, onNotification = () => {}, onRequest, onDisconnect = () => {}, timeout = 90000 } = {}) {
   const stdio = mode === 'stdio';
   const proc = spawn(env.AGENT_BROKER_CODEX || 'codex', stdio ? ['app-server', '--listen', 'stdio://'] : ['app-server', 'proxy'], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const pending = new Map();
@@ -38,8 +38,19 @@ function connectProxy({ env = process.env, spawn = defaultSpawn, mode = 'proxy',
       const p = pending.get(msg.id); pending.delete(msg.id);
       if (msg.error) p.reject(msg.error); else p.resolve(msg.result);
     } else if (msg.id !== undefined && msg.method) {
-      frame(1, JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'broker: not supported' } }));
+      if (onRequest) {
+        try { onRequest(msg); }
+        catch (error) { respond(msg.id, undefined, { code: -32603, message: error.message }); }
+      } else respond(msg.id, undefined, { code: -32601, message: 'broker: not supported' });
     } else onNotification(msg);
+  }
+  // Server requests have their own lifetime; they never enter the timed client-RPC map.
+  function respond(id, result, error) {
+    if (!alive) throw Error('Cannot respond on a disconnected transport');
+    if (result instanceof Error || (Number.isInteger(result?.code) && typeof result.message === 'string')) {
+      error = { code: result.code ?? -32603, message: result.message }; result = undefined;
+    }
+    frame(1, JSON.stringify({ jsonrpc: '2.0', id, ...(error ? { error } : { result }) }));
   }
   function frames() {
     for (;;) {
@@ -81,7 +92,7 @@ function connectProxy({ env = process.env, spawn = defaultSpawn, mode = 'proxy',
   if (stdio) { clearTimeout(handshakeTimer); readyResolve(); }
   else proc.stdin.write(`GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
   return {
-    ready, get alive() { return alive; },
+    ready, respond, get alive() { return alive; },
     request(method, params, limit = timeout) {
       if (!alive) return Promise.reject({ reason: 'disconnected', message: 'no connection' });
       return new Promise((resolve, reject) => {

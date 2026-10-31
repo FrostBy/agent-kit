@@ -95,11 +95,15 @@ node statusline.js --codex --preview    # демо папки-зонтика с 
 
 ## Брокер агентов и синхронизация сессий (экспериментально)
 
-**Брокер.** Claude запускает Codex (через `codex app-server proxy`) или Kimi фоновыми исполнителями, с inbox для следующих сообщений, steering и прерывания. `--state` указывайте на scratchpad, который читает статуслайн. `node install.js --only broker` печатает команду; npm также даёт `agent-broker`. Исполняемые файлы берутся из PATH или `AGENT_BROKER_CODEX` / `AGENT_BROKER_KIMI`. Завершённые потоки Codex архивируются и разархивируются при resume.
+**Брокер.** Claude запускает Codex (через `codex app-server proxy`) или Kimi фоновыми исполнителями, с inbox для следующих сообщений, steering и прерывания. `--state` указывайте на scratchpad, который читает статуслайн. `node install.js --only broker` печатает команду; npm также даёт `agent-broker`. Исполняемые файлы берутся из PATH или `AGENT_BROKER_CODEX` / `AGENT_BROKER_KIMI`. Завершённые потоки Codex архивируются и разархивируются при resume. Для оркестратора из фоновых команд: `broker.js send --name X --state DIR (--message FILE | --text "...")` кладёт сообщение в inbox и ждёт конца хода, `broker.js wait --name X --state DIR` ждёт конца текущего или следующего хода; обе печатают `<name>.out.md` и выходят 0 (если брокер нельзя возобновить или истёк `--timeout-min` — 1).
+
+Брокер выходит через 15 минут простоя (меняется через `--idle-min`); `send` поднимает умерший брокер с сохранёнными параметрами и сессией Codex/Kimi без повтора исходного prompt. Mesh-hook не будит на штатный/idle-выход; синхронный SessionEnd закрывает брокеры сессии, а найденный PID владельца дополнительно ограничивает их жизнь.
 
 ```sh
 node scripts/agents/broker.js --agent codex --name reviewer --state /tmp/scratchpad --prompt /tmp/prompt.md --cwd /path/to/project
 ```
+
+**Интерактивный mesh (итерации 1–2).** Вопросы и approvals Codex ожидают `broker.js answer|approve|deny --name X --state DIR --request ID`; типизированные `interrupt`/`exit` работают во время хода. `--approval-policy` по умолчанию `never`. `events --state DIR --next` ждёт одно событие и продвигает курсор без повторной выдачи. Необязательный Claude hook использует `asyncRewake` на SessionStart/Stop; установка вручную: `node scripts/agents/mesh-hook.js install`, удаление: `uninstall`. [Подключение, точный settings JSON и live-приёмка](docs/agent-mesh.md#подключение-итераций-1–2). Idle wake ещё нужно проверить на целевой версии Claude.
 
 **Синк сессий** по умолчанию выключен, в том числе с `--yes`:
 
