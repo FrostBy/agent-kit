@@ -19,6 +19,7 @@ function connectProxy({ env = process.env, spawn = defaultSpawn, mode = 'proxy',
     for (const p of pending.values()) p.reject(error);
     pending.clear();
     try { proc.kill(); } catch {}
+    proc.stdin.destroy?.(); proc.stdout.destroy?.(); proc.stderr.destroy?.();
     if (!closed) onDisconnect(why);
   }
   function frame(opcode, payload) {

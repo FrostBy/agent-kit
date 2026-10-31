@@ -16,6 +16,7 @@ function fixture(t, agent) {
   const prompt = path.join(root, 'prompt.md'); fs.writeFileSync(prompt, 'local fixture');
   const exits = [];
   const processMock = Object.assign(new EventEmitter(), { env: { HOME: root, USERPROFILE: root }, pid: 123, cwd: () => root, argv: ['node', 'broker.js', '--agent', agent, '--name', 'worker', '--state', root, '--prompt', prompt], exit: code => { exits.push(code); } });
+  if (agent === 'kimi') processMock.argv.push('--kimi-print');
   const children = [], requests = [], intervals = [], timers = [], answers = {};
   function spawn(command, args, options) {
     const stdio = args.includes('stdio://');
@@ -94,6 +95,9 @@ test('Codex holds server questions, validates answers and replies on the origina
 test('approval policy is opt-in and approve/deny use command, file and permissions response schemas', async t => {
   const f = fixture(t, 'codex'); f.processMock.argv.push('--approval-policy', 'on-request'); f.run(); await settle();
   assert.equal(f.requests.find(r => r.method === 'thread/start').params.approvalPolicy, 'on-request');
+  assert.equal(f.requests.find(r => r.method === 'thread/start').params.approvalsReviewer, 'user');
+  const defaultStart = fixture(t, 'codex'); defaultStart.run(); await settle();
+  assert.equal(defaultStart.requests.find(r => r.method === 'thread/start').params.approvalsReviewer, undefined);
   const child = f.children[0].child;
   for (const kind of ['commandExecution', 'fileChange', 'permissions']) for (const type of ['approve', 'deny']) {
     const id = `${kind}-${type}`, permissions = { network: { enabled: true }, fileSystem: { write: ['/fixture'] } };
@@ -108,6 +112,26 @@ test('approval policy is opt-in and approve/deny use command, file and permissio
   await settle(); meshCommand(f, 'approve', { requestId: meshEvents(f).at(-1).requestId }); await settle();
   assert.match(meshEvents(f).at(-1).summary, /not available/);
   assert(!f.requests.some(r => r.id === 'limited' && !r.method));
+});
+
+test('command approval deny falls back to cancel when decline is not offered', async t => {
+  const f = fixture(t, 'codex'); f.processMock.argv.push('--approval-policy', 'on-request'); f.run(); await settle();
+  const child = f.children[0].child;
+  child.send({ id: 'classic', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-fixture', turnId: 'turn-fixture', reason: 'fixture', availableDecisions: ['accept', 'decline'] } });
+  child.send({ id: 'amended', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-fixture', turnId: 'turn-fixture', reason: 'fixture', availableDecisions: ['accept', { acceptWithExecpolicyAmendment: { network: true } }, 'cancel'] } });
+  await settle();
+  meshCommand(f, 'deny', { requestId: meshEvents(f).find(e => e.type === 'approval' && e.payload.reason === 'fixture' && JSON.stringify(e.payload.availableDecisions).includes('decline')).requestId }); await settle();
+  assert.deepEqual(f.requests.find(r => r.id === 'classic' && !r.method).result, { decision: 'decline' });
+  meshCommand(f, 'deny', { requestId: meshEvents(f).find(e => e.type === 'approval' && e.payload.reason === 'fixture' && JSON.stringify(e.payload.availableDecisions).includes('cancel')).requestId }); await settle();
+  assert.deepEqual(f.requests.find(r => r.id === 'amended' && !r.method).result, { decision: 'cancel' });
+  // Ошибка валидации (ни decline, ни cancel) не закрывает запрос: повторный ответ проходит.
+  child.send({ id: 'retry', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-fixture', turnId: 'turn-fixture', availableDecisions: ['accept'] } });
+  await settle(); meshCommand(f, 'deny', { requestId: meshEvents(f).at(-1).requestId }); await settle();
+  assert.match(meshEvents(f).at(-1).summary, /not available/);
+  assert(!f.requests.some(r => r.id === 'retry' && !r.method));
+  meshCommand(f, 'approve', { requestId: meshEvents(f).find(e => e.type === 'approval' && e.payload.turnId === 'turn-fixture'
+    && !meshEvents(f).some(x => x.type === 'request.resolved' && x.requestId === e.requestId)).requestId }); await settle();
+  assert.deepEqual(f.requests.find(r => r.id === 'retry' && !r.method).result, { decision: 'accept' });
 });
 
 test('server resolution, interrupt, completion and disconnect invalidate requests, including reused wire IDs', async t => {
@@ -189,6 +213,38 @@ test('Codex broker keeps state format and exclusion policy; turns, inbox steerin
   assert(f.requests.some(r => r.method === 'thread/resume' && r.params.threadId === 'thread-fixture'));
 });
 
+test('Codex mode preserves model/effort on every Plan turn and omits collaborationMode by default', async t => {
+  for (const mode of [undefined, 'default', 'plan']) for (const override of [false, true]) {
+    const f = fixture(t, 'codex');
+    if (mode) f.processMock.argv.push('--mode', mode);
+    if (override) f.processMock.argv.push('--model', 'selected-model', '--effort', 'high');
+    f.answers['thread/start'] = () => ({ result: { thread: { id: 'thread-fixture' }, model: 'current-model', reasoningEffort: 'low' } });
+    f.run(); await settle();
+    assert.equal(f.state().launch.mode, mode ?? 'default');
+    const check = (model, effort) => {
+      const params = f.requests.filter(r => r.method === 'turn/start').at(-1).params;
+      if (mode === 'plan') assert.deepEqual(params.collaborationMode, { mode: 'plan', settings: {
+        model: override ? 'selected-model' : model, reasoning_effort: override ? 'high' : effort, developer_instructions: null,
+      } });
+      else assert(!Object.hasOwn(params, 'collaborationMode'));
+    };
+    check('current-model', 'low');
+    if (mode === 'plan') assert.equal(f.requests.find(r => r.method === 'initialize').params.capabilities.experimentalApi, true);
+    f.children[0].child.send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
+    f.children[0].child.send({ method: 'thread/settings/updated', params: { threadId: 'thread-fixture', threadSettings: { model: 'updated-model', effort: 'medium' } } });
+    fs.writeFileSync(path.join(f.root, 'worker.inbox', 'next'), 'next turn'); f.intervals[0](); await settle();
+    assert.equal(f.requests.filter(r => r.method === 'turn/start').length, 2);
+    check('updated-model', 'medium');
+  }
+});
+
+test('--mode rejects invalid values and non-Codex agents before spawning', t => {
+  for (const [agent, mode] of [['codex', 'auto'], ['kimi', 'plan'], ['claude', 'default']]) {
+    const f = fixture(t, agent); f.processMock.argv.push('--mode', mode);
+    assert.throws(f.run, /Invalid --mode/); assert.equal(f.children.length, 0);
+  }
+});
+
 test('Kimi broker preserves sessionId and resumes through inbox without real CLI or network', async t => {
   const f = fixture(t, 'kimi'); f.run();
   assert.equal(f.children[0].command, 'kimi');
@@ -199,6 +255,134 @@ test('Kimi broker preserves sessionId and resumes through inbox without real CLI
   assert.equal(broker.agents(f.root, 'kimi')[0].id, 'session_fixture');
   fs.writeFileSync(path.join(f.root, 'worker.inbox', 'next'), 'next prompt'); f.timers.at(-1)(); await settle();
   assert(Array.from(f.children[1].args).includes('session_fixture'));
+});
+
+test('interactive broker queues busy messages as next turns while answers and interrupt stay independent', async t => {
+  const f = fixture(t, 'claude'), original = f.context.require;
+  const prompts = [], responses = []; let options, complete, interrupted = false;
+  f.context.require = name => name === '../../src/agents/interactive-client' ? {
+    ...original(name), connectInteractive(config) {
+      options = config;
+      return { ready: Promise.resolve(), prompt(text) { prompts.push(text); return new Promise(resolve => { complete = resolve; }); },
+        respond(id, result) { responses.push({ id, result }); }, interrupt: async () => { interrupted = true; }, close: async () => {} };
+    }
+  } : original(name);
+  f.run(); await settle(); assert.equal(f.state().capabilities.steer, false);
+  fs.writeFileSync(path.join(f.root, 'worker.inbox', 'next'), 'next message'); f.intervals[0](); await settle();
+  assert.deepEqual(prompts, ['local fixture']);
+  options.onRequest({ id: 'question', method: 'can_use_tool', params: { tool_name: 'AskUserQuestion', input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] } } });
+  const event = meshEvents(f).find(e => e.type === 'question');
+  meshCommand(f, 'answer', { requestId: event.requestId, text: 'A' }); await settle();
+  assert.equal(responses[0].result.updatedInput.answers['Q?'], 'A'); assert.deepEqual(prompts, ['local fixture']);
+  complete({ text: 'first', status: 'completed' }); await settle();
+  assert.deepEqual(prompts, ['local fixture', 'next message']); assert.equal(f.state().turns, 1);
+  meshCommand(f, 'interrupt'); await settle(); assert(interrupted);
+  complete({ text: '', status: 'interrupted' }); await settle();
+  assert.equal(f.state().status, 'idle'); assert.equal(f.state().turns, 2);
+  meshCommand(f, 'exit'); await settle(); assert.deepEqual(f.exits, [0]);
+});
+
+test('sandbox workspace-write auto-approves in-cwd writes and ordinary commands without waking the orchestrator', async t => {
+  const f = fixture(t, 'claude'), original = f.context.require;
+  const responses = []; let options, complete;
+  f.context.require = name => name === '../../src/agents/interactive-client' ? {
+    ...original(name), connectInteractive(config) {
+      options = config;
+      return { ready: Promise.resolve(), prompt() { return new Promise(resolve => { complete = resolve; }); },
+        respond(id, result) { responses.push({ id, result }); }, interrupt: async () => {}, close: async () => {} };
+    }
+  } : original(name);
+  f.processMock.argv.push('--sandbox', 'workspace-write');
+  f.run(); await settle();
+  fs.writeFileSync(path.join(f.root, 'worker.inbox', 'go'), 'run'); f.intervals[0](); await settle();
+  const ask = (id, tool_name, input) => options.onRequest({ id, method: 'can_use_tool', params: { tool_name, input } });
+  ask('in-cwd', 'Edit', { file_path: path.join(f.root, 'a.txt'), old_string: 'x', new_string: 'y' }); await settle();
+  assert.deepEqual(responses.at(-1), { id: 'in-cwd', result: { behavior: 'allow', updatedInput: { file_path: path.join(f.root, 'a.txt'), old_string: 'x', new_string: 'y' } } });
+  assert(!meshEvents(f).some(e => e.type === 'approval')); assert(!meshEvents(f).some(e => e.type === 'question'));
+  assert.equal(meshEvents(f).filter(e => e.type === 'approval.auto' && e.payload.decision === 'approve').length, 1);
+  assert.deepEqual(f.state().pendingRequests, []);
+  ask('bash', 'Bash', { command: 'npm test' }); await settle();
+  assert.equal(responses.at(-1).id, 'bash'); assert.equal(responses.at(-1).result.behavior, 'allow');
+  ask('curl', 'Bash', { command: 'curl https://example.com' }); await settle();
+  assert(!responses.some(r => r.id === 'curl')); assert(meshEvents(f).some(e => e.type === 'approval'));
+  complete({ text: 'done', status: 'completed' }); await settle();
+  assert(!responses.some(r => r.id === 'curl'));
+});
+
+test('sandbox workspace-write defers writes outside cwd to the orchestrator', async t => {
+  const f = fixture(t, 'claude'), original = f.context.require;
+  const responses = []; let options, complete;
+  f.context.require = name => name === '../../src/agents/interactive-client' ? {
+    ...original(name), connectInteractive(config) {
+      options = config;
+      return { ready: Promise.resolve(), prompt() { return new Promise(resolve => { complete = resolve; }); },
+        respond(id, result) { responses.push({ id, result }); }, interrupt: async () => {}, close: async () => {} };
+    }
+  } : original(name);
+  f.processMock.argv.push('--sandbox', 'workspace-write');
+  f.run(); await settle();
+  fs.writeFileSync(path.join(f.root, 'worker.inbox', 'go'), 'run'); f.intervals[0](); await settle();
+  options.onRequest({ id: 'outside', method: 'can_use_tool', params: { tool_name: 'Write', input: { file_path: path.join(os.tmpdir(), 'elsewhere-agent-kit.txt'), content: 'x' } } });
+  await settle();
+  assert(!responses.some(r => r.id === 'outside'));
+  const event = meshEvents(f).find(e => e.type === 'approval');
+  assert(event); assert.match(event.summary, /Write/);
+  meshCommand(f, 'approve', { requestId: event.requestId }); await settle();
+  assert.deepEqual(responses.at(-1), { id: 'outside', result: { behavior: 'allow', updatedInput: { file_path: path.join(os.tmpdir(), 'elsewhere-agent-kit.txt'), content: 'x' } } });
+  complete({ text: 'done', status: 'completed' }); await settle();
+});
+
+test('sandbox read-only auto-denies writes and leaves ordinary commands to the orchestrator', async t => {
+  const f = fixture(t, 'claude'), original = f.context.require;
+  const responses = []; let options, complete;
+  f.context.require = name => name === '../../src/agents/interactive-client' ? {
+    ...original(name), connectInteractive(config) {
+      options = config;
+      return { ready: Promise.resolve(), prompt() { return new Promise(resolve => { complete = resolve; }); },
+        respond(id, result) { responses.push({ id, result }); }, interrupt: async () => {}, close: async () => {} };
+    }
+  } : original(name);
+  f.processMock.argv.push('--sandbox', 'read-only');
+  f.run(); await settle();
+  fs.writeFileSync(path.join(f.root, 'worker.inbox', 'go'), 'run'); f.intervals[0](); await settle();
+  options.onRequest({ id: 'write', method: 'can_use_tool', params: { tool_name: 'Write', input: { file_path: path.join(f.root, 'a.txt'), content: 'x' } } });
+  await settle();
+  assert.deepEqual(responses.at(-1), { id: 'write', result: { behavior: 'deny', message: 'Denied by orchestrator' } });
+  assert(!meshEvents(f).some(e => e.type === 'approval')); assert(!meshEvents(f).some(e => e.type === 'question'));
+  assert.equal(meshEvents(f).filter(e => e.type === 'approval.auto' && e.payload.decision === 'deny').length, 1);
+  options.onRequest({ id: 'bash', method: 'can_use_tool', params: { tool_name: 'Bash', input: { command: 'ls' } } });
+  await settle();
+  assert(!responses.some(r => r.id === 'bash')); assert(meshEvents(f).some(e => e.type === 'approval'));
+  complete({ text: 'done', status: 'completed' }); await settle();
+});
+
+test('kimi ACP sandbox auto-approval answers with the allow_once permission option', async t => {
+  const f = fixture(t, 'kimi'), original = f.context.require;
+  f.processMock.argv.splice(f.processMock.argv.indexOf('--kimi-print'), 1);
+  const responses = []; let options, complete;
+  f.context.require = name => name === '../../src/agents/interactive-client' ? {
+    ...original(name), connectInteractive(config) {
+      options = config;
+      return { ready: Promise.resolve(), prompt() { return new Promise(resolve => { complete = resolve; }); },
+        respond(id, result) { responses.push({ id, result }); }, interrupt: async () => {}, close: async () => {} };
+    }
+  } : original(name);
+  f.processMock.argv.push('--sandbox', 'workspace-write');
+  f.run(); await settle();
+  options.onSession('session-fixture');
+  fs.writeFileSync(path.join(f.root, 'worker.inbox', 'go'), 'run'); f.intervals[0](); await settle();
+  const permission = { sessionId: 'session-fixture', toolCall: { title: 'Edit', content: [{ content: { text: 'edit a.txt' }, locations: [{ path: path.join(f.root, 'a.txt') }] }] },
+    options: [{ kind: 'allow_always', optionId: 'always' }, { kind: 'allow_once', optionId: 'once' }, { kind: 'reject_once', optionId: 'no' }] };
+  options.onRequest({ id: 'perm', method: 'session/request_permission', params: permission });
+  await settle();
+  assert.deepEqual(responses.at(-1), { id: 'perm', result: { outcome: { outcome: 'selected', optionId: 'once' } } });
+  assert(!meshEvents(f).some(e => e.type === 'approval'));
+  assert.equal(meshEvents(f).filter(e => e.type === 'approval.auto' && e.payload.decision === 'approve').length, 1);
+  permission.toolCall = { title: 'WebFetch', content: [{ content: { text: 'https://example.com' } }] };
+  options.onRequest({ id: 'net', method: 'session/request_permission', params: permission });
+  await settle();
+  assert(!responses.some(r => r.id === 'net')); assert(meshEvents(f).some(e => e.type === 'approval'));
+  complete({ text: 'done', status: 'completed' }); await settle();
 });
 
 test('broker refuses names escaping its state directory before starting a CLI', t => {
@@ -520,7 +704,7 @@ test('idle defaults to 15 minutes, preserves overrides and emits an idle exit fo
 test('send revives detached Codex/Kimi with saved settings and delivers only the new turn', async t => {
   for (const agent of ['codex', 'kimi']) {
     const f = fixture(t, agent), stateFile = path.join(f.root, 'worker.state.json');
-    const launch = { agent, cwd: f.root, model: 'saved-model', effort: 'high', sandbox: 'read-only', approvalPolicy: 'on-request', network: true, search: true, idleMin: 3 };
+    const launch = { agent, cwd: f.root, model: 'saved-model', effort: 'high', mode: agent === 'codex' ? 'plan' : undefined, sandbox: 'read-only', approvalPolicy: 'on-request', network: true, search: true, idleMin: 3, kimiPrint: agent === 'kimi' };
     fs.writeFileSync(stateFile, JSON.stringify({ agent, pid: 999999999, status: 'done', turns: 4, threadId: agent === 'codex' ? 'thread-saved' : undefined,
       sessionId: agent === 'kimi' ? 'session_saved' : undefined, turnId: 'old-turn', launch }));
     const stale = require('../src/agents/mesh').eventWriter(path.join(f.root, 'worker'), 'worker')('question', {}, { requestId: 'stale' });
@@ -540,9 +724,12 @@ test('send revives detached Codex/Kimi with saved settings and delivers only the
     if (agent === 'codex') {
       const resume = f.requests.find(r => r.method === 'thread/resume'); assert.equal(resume.params.threadId, 'thread-saved');
       assert.equal(resume.params.model, 'saved-model'); assert.equal(resume.params.approvalPolicy, 'on-request');
+      assert.equal(resume.params.approvalsReviewer, 'user');
       assert.equal(resume.params.sandbox, 'read-only'); assert.equal(resume.params.config.web_search, 'live');
       const turns = f.requests.filter(r => r.method === 'turn/start'); assert.equal(turns.length, 1);
       assert.equal(turns[0].params.input[0].text, 'new message'); assert.equal(turns[0].params.effort, 'high');
+      assert.deepEqual(turns[0].params.collaborationMode, { mode: 'plan', settings: { model: 'saved-model', reasoning_effort: 'high', developer_instructions: null } });
+      assert.equal(f.state().launch.mode, 'plan');
       assert(!f.requests.some(r => r.method === 'turn/steer' || r.method === 'thread/start'));
       f.children[0].child.send({ method: 'item/completed', params: { item: { type: 'agentMessage', text: 'resumed result' } } });
       f.children[0].child.send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });

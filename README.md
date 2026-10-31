@@ -13,7 +13,7 @@
 - **Statusline for Claude Code and Codex** (Codex: native footer or a log panel): context, quotas, git across umbrella repositories, runtime activity, Codex/Kimi executor widgets. Dependency-free Node, TUI editor, English and Russian.
 - **Codex patches**: a native footer driven by the same renderer, full diffs, command timing, capacity retries, Shift+Tab Plan/Auto, restricted subagents via a `readonly-`/`plan-` task name prefix. You build Codex yourself from the patched sources; no binaries are shipped.
 - **Faster Codex voice**: a realtime prompt for quicker speech (configuration only).
-- **Agent broker**: Claude runs Codex/Kimi as background executors; finished Codex threads are archived so they do not clutter session lists.
+- **Agent broker**: Codex, Kimi ACP and Claude background workers, interactive decisions and event delivery to orchestrators; finished Codex threads are archived.
 - **Session sync (experimental)**: a Claude Code session and a Codex session in the same project mirror each other both ways, with native history, titles and tool calls; continue in Codex when Claude tokens run out and back.
 
 Русская версия: [README.RU.md](README.RU.md)
@@ -95,7 +95,7 @@ node statusline.js --codex --preview    # sample umbrella with three repositorie
 
 ## Agent broker and session sync (experimental)
 
-**Broker.** Claude runs Codex (through `codex app-server proxy`) or Kimi as background executors, with an inbox for follow-ups, steering and interruption. Point `--state` at the scratchpad the statusline reads. `node install.js --only broker` prints the command; npm also exposes `agent-broker`. Executables come from PATH or `AGENT_BROKER_CODEX` / `AGENT_BROKER_KIMI`. Finished Codex threads are archived and unarchived on resume. For orchestrators and background commands: `broker.js send --name X --state DIR (--message FILE | --text "...")` drops a message into the inbox and waits for the turn to finish, `broker.js wait --name X --state DIR` waits for the current or next turn to finish; both print `<name>.out.md` and exit 0 (1 if the broker cannot resume or `--timeout-min` expires).
+**Broker.** Run Codex (shared app-server), Kimi (`kimi acp`) or Claude (persistent stream-json) as background workers. Questions, permissions, cancellation and session resurrection use the same broker commands. Codex and server-owned Kimi web orchestrators can receive events directly; Claude supports the event waiter and optional wake hook. Kimi/Claude queue busy messages for the next turn (`steer=false`). Point `--state` at the scratchpad the statusline reads. `send/wait` print and ACK the result; `send` revives an exited worker from its saved session. See the [short broker README](scripts/agents/README.md) for commands, executable overrides, the legacy `--kimi-print` flag and isolated live tests.
 
 ```sh
 node scripts/agents/broker.js --agent codex --name reviewer --state /tmp/scratchpad --prompt /tmp/prompt.md --cwd /path/to/project
@@ -103,7 +103,7 @@ node scripts/agents/broker.js --agent codex --name reviewer --state /tmp/scratch
 
 Brokers exit after 15 idle minutes (`--idle-min` overrides); `send` revives a dead broker using saved settings and its Codex/Kimi session, without replaying the initial prompt. Mesh hooks ignore normal/idle exits; the synchronous SessionEnd hook closes session brokers, and a detected owner PID also binds their lifetime.
 
-**Interactive mesh (iterations 1–2).** Codex questions and approvals stay open for `broker.js answer|approve|deny --name X --state DIR --request ID`; typed `interrupt`/`exit` also work during a turn. `--approval-policy` defaults to `never`. `events --state DIR --next` waits for one event and advances a cursor so it is not delivered twice. The optional Claude `mesh-hook.js` uses `asyncRewake` on SessionStart/Stop; install it explicitly with `node scripts/agents/mesh-hook.js install` (remove with `uninstall`). See [setup, settings JSON and live acceptance checks](docs/agent-mesh.md#подключение-итераций-1–2). Live idle wake still needs acceptance on your Claude version.
+**Interactive mesh.** Use `broker.js answer|approve|deny --name X --state DIR --request ID` for pending requests. `interrupt/exit` work during a turn. Codex's `--approval-policy` defaults to `never`; Claude never bypasses permissions. The optional Claude `mesh-hook.js` uses `asyncRewake` on SessionStart/Stop; install it explicitly with `node scripts/agents/mesh-hook.js install` (remove with `uninstall`). See [setup and the live validation matrix](docs/agent-mesh.md). Autonomous Claude idle wake and native TUI rendering still need acceptance; loopback CLI protocol tests are covered separately.
 
 **Session sync** is off by default, including with `--yes`:
 

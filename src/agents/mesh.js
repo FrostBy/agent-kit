@@ -36,9 +36,9 @@ function alive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
 }
-function lock(dir) {
+function lock(dir, name = '.mesh-events.lock') {
   fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, '.mesh-events.lock');
+  const file = path.join(dir, name);
   for (;;) {
     try {
       const fd = fs.openSync(file, 'wx', 0o600);
@@ -61,6 +61,28 @@ function saveCursor(dir, value) {
   const file = path.join(dir, '.mesh-events.cursor.json'), tmp = `${file}.${randomUUID()}.tmp`;
   try { fs.writeFileSync(tmp, JSON.stringify(value), { mode: 0o600 }); fs.renameSync(tmp, file); }
   finally { fs.rmSync(tmp, { force: true }); }
+}
+function updateCursor(dir, update) {
+  const deadline = Date.now() + 2000;
+  let release;
+  for (;;) {
+    try { release = lock(dir, '.mesh-cursor.lock'); break; }
+    catch (error) {
+      if (error.code !== 'EVENTS_LOCKED' || Date.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    }
+  }
+  try { const seen = cursor(dir); update(seen); saveCursor(dir, seen); }
+  finally { release(); }
+}
+function ackDelivered(dir, ids) {
+  if (!ids.length) return;
+  // Sparse ACKs must not hide an earlier question or an event from another agent.
+  const mark = target => updateCursor(target, seen => { seen.delivered = [...new Set([...(seen.delivered || []), ...ids])]; });
+  mark(dir);
+  const parent = path.dirname(dir);
+  // A Claude hook watches the scratchpad, including brokers one directory below it.
+  if (parent !== dir && ['.mesh-events.cursor.json', '.mesh-events.lock'].some(file => fs.existsSync(path.join(parent, file)))) mark(parent);
 }
 function eventFiles(dir, suffix = '.events.jsonl') {
   // Match the statusline's scratchpad layout: brokers can also live one directory down.
@@ -107,7 +129,7 @@ async function nextEvent(dir, { timeoutMin = 120, pollMs = 250, signal, wakeOnly
       for (const file of eventFiles(dir)) {
         const events = readEvents(path.join(dir, file));
         const resolved = new Set(events.filter(e => e.type === 'request.resolved').map(e => e.requestId));
-        const next = events.find(e => e.seq > (seen[file] || 0) && wakeTypes.has(e.type) &&
+        const next = events.find(e => e.seq > (seen[file] || 0) && !seen.delivered?.includes(e.id) && wakeTypes.has(e.type) &&
           (!wakeOnly || e.type !== 'agent.exited' || ['error', 'unexpected'].includes(e.payload?.reason) || e.payload?.status === 'error' || e.payload?.code > 0) &&
           !(['question', 'approval'].includes(e.type) && resolved.has(e.requestId)));
         if (next) candidates.push({ ...next, file });
@@ -116,7 +138,12 @@ async function nextEvent(dir, { timeoutMin = 120, pollMs = 250, signal, wakeOnly
       if (candidates.length) {
         const event = candidates[0];
         // Consumption is the cursor ACK, committed under the same exclusive waiter lock.
-        seen[event.file] = event.seq; saveCursor(dir, seen);
+        let consumed = false;
+        updateCursor(dir, current => {
+          if ((current[event.file] || 0) >= event.seq || current.delivered?.includes(event.id)) return;
+          current[event.file] = event.seq; consumed = true;
+        });
+        if (!consumed) continue;
         return event;
       }
       if (Date.now() >= deadline) return null;
@@ -127,15 +154,11 @@ async function nextEvent(dir, { timeoutMin = 120, pollMs = 250, signal, wakeOnly
   } finally { release(); }
 }
 function ack(dir, id) {
-  const release = lock(dir);
-  try {
-    const seen = cursor(dir);
     for (const file of eventFiles(dir)) {
       const event = readEvents(path.join(dir, file)).find(e => e.id === id);
-      if (event) { seen[file] = Math.max(seen[file] || 0, event.seq); saveCursor(dir, seen); return; }
+      if (event) { ackDelivered(dir, [id]); return; }
     }
     throw Error('Unknown event ID');
-  } finally { release(); }
 }
 function formatEvent(event, dir) {
   const script = path.resolve(__dirname, '../../scripts/agents/broker.js').replace(/\\/g, '/');
@@ -169,7 +192,8 @@ function approvalResult(method, params, approve) {
     // A bare approval grants exactly the requested permissions, for this turn only.
     return { permissions: approve ? params.permissions : {}, scope: 'turn' };
   }
-  const decision = approve ? 'accept' : 'decline';
+  const fallback = !approve && Array.isArray(params.availableDecisions) && !params.availableDecisions.includes('decline') && params.availableDecisions.includes('cancel');
+  const decision = approve ? 'accept' : fallback ? 'cancel' : 'decline';
   if (params.availableDecisions && !params.availableDecisions.includes(decision)) throw Error(`Decision ${decision} is not available`);
   return { decision };
 }
@@ -195,7 +219,8 @@ async function runCommand(argv) {
   if (['answer', 'approve', 'deny'].includes(command) && !opt.request) throw Error('--request ID is required');
   if (command === 'answer' && (Number(opt.text !== undefined) + Number(opt.file !== undefined) !== 1)) throw Error('answer requires --text or --file JSON');
   const state = JSON.parse(fs.readFileSync(path.join(dir, `${opt.name}.state.json`), 'utf8'));
-  if (state.agent !== 'codex' || ['done', 'error'].includes(state.status) || !alive(state.pid)) throw Error('No live Codex broker');
+  if (!['codex', 'kimi', 'claude'].includes(state.agent) || ['done', 'error'].includes(state.status) || !alive(state.pid)) throw Error('No live agent broker');
+  if (state.launch?.kimiPrint && ['answer', 'approve', 'deny', 'interrupt'].includes(command)) throw Error('Kimi print compatibility mode does not support interactive control; use ACP');
   const envelope = { v: 1, id: randomUUID(), type: command, payload: { requestId: opt.request,
     ...(opt.text !== undefined ? { text: opt.text } : {}), ...(opt.file ? { result: JSON.parse(fs.readFileSync(opt.file, 'utf8')) } : {}) } };
   const inbox = path.join(dir, `${opt.name}.inbox`), tmp = path.join(inbox, `.tmp-${envelope.id}`);
@@ -204,4 +229,4 @@ async function runCommand(argv) {
   fs.renameSync(tmp, path.join(inbox, `${String(Date.now()).padStart(15, '0')}-${envelope.id}.command.json`));
   console.log(`queued ${envelope.id}`);
 }
-module.exports = { eventWriter, nextEvent, ack, formatEvent, questionResult, approvalResult, runCommand, hasLiveBroker, brokerStates, alive, detectDeaths };
+module.exports = { eventWriter, nextEvent, ack, ackDelivered, readEvents, formatEvent, questionResult, approvalResult, runCommand, hasLiveBroker, brokerStates, alive, detectDeaths };

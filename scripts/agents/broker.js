@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Живая сессия внешнего агента (Codex через общий app-server, Kimi через -S) с почтовым ящиком.
+// Живая сессия Codex app-server, Kimi ACP или Claude stream-json с почтовым ящиком.
 // Сообщения - файлы в <state>/<name>.inbox/ (любое имя, порядок по имени): во время хода Codex
 // уходят как turn/steer, после хода - новым ходом в ту же сессию. Команды в файле: /interrupt, /exit.
 // Выход: <name>.out.md - последний ответ агента, <name>.history.md - все ходы, <name>.log - события,
@@ -35,9 +35,11 @@ for (let i = 0; i < argv.length; i++) {
   else if (k === '--state') opt.state = v();
   else if (k === '--prompt') opt.prompt = v();
   else if (k === '--resume') opt.resume = true;
+  else if (k === '--kimi-print') opt.kimiPrint = true;
   else if (k === '--cwd') opt.cwd = v();
   else if (k === '--model') opt.model = v();
   else if (k === '--effort') opt.effort = v();
+  else if (k === '--mode') opt.mode = v();
   else if (k === '--sandbox') opt.sandbox = v();
   else if (k === '--approval-policy') opt.approvalPolicy = v();
   else if (k === '--network') opt.network = true;
@@ -48,11 +50,13 @@ for (let i = 0; i < argv.length; i++) {
   else throw new Error(`unknown arg ${k}`);
 }
 if (!opt.agent || !opt.name || !opt.state || (!opt.prompt && !opt.resume)) {
-  console.error('usage: agent-broker --agent codex|kimi --name X --state DIR --prompt FILE [--cwd DIR] [--model M] [--effort E] [--sandbox read-only|workspace-write] [--network] [--search] [--image PNG]... [--idle-min 15] [--claude-config-dir DIR]...');
+  console.error('usage: agent-broker --agent codex|kimi|claude --name X --state DIR --prompt FILE [--cwd DIR] [--model M] [--effort E] [--mode default|plan (codex only)] [--sandbox read-only|workspace-write] [--network] [--search] [--image PNG]... [--idle-min 15] [--kimi-print] [--claude-config-dir DIR]...');
   process.exit(2);
 }
 if (!/^[\w-]+$/.test(opt.name)) throw Error('Invalid agent name');
-if (!['codex', 'kimi'].includes(opt.agent)) throw Error('Invalid agent');
+if (!['codex', 'kimi', 'claude'].includes(opt.agent)) throw Error('Invalid agent');
+if (opt.mode !== undefined && (opt.agent !== 'codex' || !['default', 'plan'].includes(opt.mode))) throw Error('Invalid --mode: expected default|plan for --agent codex');
+if (opt.agent === 'codex') opt.mode ??= 'default';
 opt.approvalPolicy ??= 'never';
 if (!['never', 'on-request', 'on-failure', 'untrusted'].includes(opt.approvalPolicy)) throw Error('Invalid --approval-policy');
 opt.cwd = path.resolve(opt.cwd ?? process.cwd());
@@ -72,8 +76,8 @@ if (previous?.pid && previous.pid !== process.pid && !['done', 'error'].includes
   if (live) throw Error('Broker state is owned by a live process');
 }
 const state = { ...(previous?.agent === opt.agent ? previous : {}), agent: opt.agent, status: 'starting', turns: previous?.agent === opt.agent ? previous.turns || 0 : 0, pid: process.pid };
-state.launch = { agent: opt.agent, cwd: opt.cwd, model: opt.model, effort: opt.effort, sandbox: opt.sandbox,
-  approvalPolicy: opt.approvalPolicy, network: !!opt.network, search: !!opt.search, idleMin: opt.idleMin, claudeConfigDirs: opt.claudeConfigDirs };
+state.launch = { agent: opt.agent, cwd: opt.cwd, model: opt.model, effort: opt.effort, mode: opt.mode, sandbox: opt.sandbox,
+  approvalPolicy: opt.approvalPolicy, network: !!opt.network, search: !!opt.search, idleMin: opt.idleMin, kimiPrint: !!opt.kimiPrint, claudeConfigDirs: opt.claudeConfigDirs };
 if (opt.resume) state.turnId = null;
 const relative = path.relative(path.join(require('node:os').tmpdir(), 'claude'), path.resolve(opt.state)).split(path.sep);
 if (relative.length >= 3 && relative[0] !== '..' && relative[2] === 'scratchpad' && /^[\w-]+$/.test(relative[1])) {
@@ -82,17 +86,42 @@ if (relative.length >= 3 && relative[0] !== '..' && relative[2] === 'scratchpad'
     if (id) { state.ownerPid = Number(id.split(':')[0]); save(); }
   });
 }
-const save = () => fs.writeFileSync(`${base}.state.json`, JSON.stringify(state, null, 2));
+// Windows refuses to replace a file another process is reading (hooks and waiters poll it): retry, then write in place.
+const save = () => {
+  const tmp = `${base}.state.json.${process.pid}.tmp`, file = `${base}.state.json`, text = JSON.stringify(state, null, 2);
+  fs.writeFileSync(tmp, text);
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try { fs.renameSync(tmp, file); return; }
+    catch (error) { if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25); }
+  }
+  fs.rmSync(tmp, { force: true }); fs.writeFileSync(file, text);
+};
+if (!opt.resume) {
+  state.orchestrator = process.env.CODEX_THREAD_ID ? { agent: 'codex', id: process.env.CODEX_THREAD_ID }
+    : process.env.KIMI_SESSION_ID ? { agent: 'kimi', id: process.env.KIMI_SESSION_ID, url: process.env.AGENT_MESH_KIMI_URL } : null;
+}
+if (state.orchestrator) {
+  if (state.owner !== state.orchestrator.id) delete state.ownerPid;
+  state.owner = state.orchestrator.id;
+}
 save();
 const log = (s) => fs.appendFileSync(`${base}.log`, `[${new Date().toISOString()}] ${s}\n`);
-const emit = eventWriter(base, opt.name);
+const writeEvent = eventWriter(base, opt.name);
+const delivery = state.orchestrator ? require('../../src/agents/mesh-owner').connectOwner({ owner: state.orchestrator, env: process.env, spawn, log,
+  onError: error => writeEvent('error', { source: 'owner', message: error.message }, { summary: error.message }) }) : null;
+const emit = (...args) => {
+  const event = writeEvent(...args);
+  delivery?.deliver(event, path.dirname(base));
+  return event;
+};
 const finishTurn = (text) => {
   state.turns++;
   state.lastTurnAt = new Date().toISOString();
   fs.writeFileSync(`${base}.out.md`, text ?? '');
   fs.appendFileSync(`${base}.history.md`, `\n\n## Ход ${state.turns}\n\n${text ?? ''}\n`);
   log(`turn ${state.turns} done`);
-  emit('turn.completed', { status: state.lastTurnStatus ?? 'completed' }, { turnId: state.turnId, summary: text || state.lastTurnStatus || 'completed' });
+  const event = emit('turn.completed', { status: state.lastTurnStatus ?? 'completed', turnNumber: state.turns }, { turnId: state.turnId, summary: text || state.lastTurnStatus || 'completed' });
+  state.lastCompletionEvent = event.id;
 };
 let lastActivity = Date.now();
 const takeInbox = () => {
@@ -101,7 +130,7 @@ const takeInbox = () => {
     const p = path.join(inbox, f);
     const text = fs.readFileSync(p, 'utf8');
     fs.renameSync(p, path.join(inbox, `.sent-${Date.now()}-${f}`));
-    if (f.endsWith('.command.json') && opt.agent === 'codex') {
+    if (f.endsWith('.command.json')) {
       try {
         const command = JSON.parse(text);
         if (!command || typeof command !== 'object' || Array.isArray(command)) throw Error('Invalid command');
@@ -119,11 +148,13 @@ const done = (status, code = 0, reason = status === 'error' ? 'error' : 'exit') 
   save();
   log(`exit ${status}`);
   emit('agent.exited', { status, code, reason, pid: process.pid }, { summary: `Agent exited: ${reason} (${code})` });
-  process.exit(code);
+  if (delivery) void delivery.flush().finally(() => { delivery.close(); process.exit(code); });
+  else process.exit(code);
 };
 
 if (opt.agent === 'codex') runCodex();
-else if (opt.agent === 'kimi') runKimi();
+else if (opt.agent === 'kimi' && opt.kimiPrint) runKimi();
+else if (['kimi', 'claude'].includes(opt.agent)) runInteractive();
 else throw new Error(`unknown agent ${opt.agent}`);
 if (state.owner) setInterval(() => {
   if (state.ownerPid && !alive(state.ownerPid)) void done('done', 0, 'owner');
@@ -186,6 +217,9 @@ function runCodex() {
     return {
       cwd: opt.cwd,
       approvalPolicy: opt.approvalPolicy,
+      // Если в config.toml пользователя approvals_reviewer = "auto_review", Codex
+      // сам одобрит запрос, и он не доедет до оркестратора. Явно фиксируем "user".
+      ...(opt.approvalPolicy !== 'never' ? { approvalsReviewer: 'user' } : {}),
       ...(opt.model ? { model: opt.model } : {}),
       ...(opt.sandbox ? { sandbox: opt.sandbox } : {}),
       ...(Object.keys(config).length ? { config } : {}),
@@ -252,6 +286,7 @@ function runCodex() {
     finally {
       state.status = status; save(); log(`exit ${status} archived ${state.archived}`);
       emit('agent.exited', { status, code, reason, pid: process.pid }, { turnId, summary: `Agent exited: ${reason} (${code})` });
+      if (delivery) { await delivery.flush(); delivery.close(); }
       conn?.close(); process.exit(code);
     }
   };
@@ -264,6 +299,11 @@ function runCodex() {
     const p = msg.params ?? {};
     if (p.threadId && threadId && p.threadId !== threadId) return;
     lastActivity = Date.now();
+    if (m === 'thread/settings/updated') {
+      state.model = p.threadSettings.model;
+      state.effort = p.threadSettings.effort;
+      save();
+    }
     if (m === 'serverRequest/resolved') {
       c.resolvedRequests.add(p.requestId);
       for (const [id, entry] of pending) if (entry.connection === c && entry.rpcId === p.requestId) resolveRequest(id, 'server resolved');
@@ -297,6 +337,9 @@ function runCodex() {
 
   const startTurn = async (text, images = []) => {
     const params = { threadId, input: input(text, images), ...(opt.effort ? { effort: opt.effort } : {}) };
+    if (opt.mode === 'plan') params.collaborationMode = { mode: 'plan', settings: {
+      model: opt.model ?? state.model, reasoning_effort: opt.effort ?? state.effort ?? null, developer_instructions: null,
+    } };
     let res;
     try {
       res = await request('turn/start', params);
@@ -393,13 +436,15 @@ function runCodex() {
 
   async function boot(c) {
     try {
-      await request('initialize', { clientInfo: { name: 'claude-agent-broker', version: '2' } });
+      await request('initialize', { clientInfo: { name: 'claude-agent-broker', version: '2' },
+        ...(opt.mode === 'plan' ? { capabilities: { experimentalApi: true } } : {}) });
       notify('initialized', {});
       if (!threadId) {
         const res = await request('thread/start', threadParams());
         threadId = res.thread?.id;
         state.threadId = threadId; state.archived = false;
         state.model = res.model;
+        state.effort = res.reasoningEffort;
         state.sandbox = res.sandbox;
         save();
         log(`thread ${threadId} model ${res.model} cwd ${res.cwd}`);
@@ -418,6 +463,8 @@ function runCodex() {
           await request('thread/unarchive', { threadId }); state.archived = false; save();
           res = await request('thread/resume', { threadId, ...threadParams() });
         }
+        state.model = res.model ?? state.model;
+        state.effort = res.reasoningEffort;
         attempt = 0;
         const turns = res.thread?.turns ?? [];
         const last = turns[turns.length - 1];
@@ -469,8 +516,11 @@ function runKimi() {
   setInterval(() => {
     if (closing || !active) return;
     const files = fs.readdirSync(inbox).filter(f => !f.startsWith('.')).sort();
-    for (const file of files) if (fs.readFileSync(path.join(inbox, file), 'utf8').trim() === '/exit') {
-      fs.renameSync(path.join(inbox, file), path.join(inbox, `.sent-${file}`)); done('done'); return;
+    for (const file of files) {
+      const text = fs.readFileSync(path.join(inbox, file), 'utf8').trim();
+      let exit = text === '/exit';
+      if (file.endsWith('.command.json')) { try { exit = JSON.parse(text).type === 'exit'; } catch {} }
+      if (exit) { fs.renameSync(path.join(inbox, file), path.join(inbox, `.sent-${file}`)); done('done'); return; }
     }
   }, 1000);
   const turn = (text) => new Promise((resolve) => {
@@ -505,6 +555,10 @@ function runKimi() {
     while (!closing) {
       const msgs = takeInbox();
       for (const text of msgs) {
+        if (typeof text === 'object') {
+          if (text.type === 'exit') { done('done'); return; }
+          emit('error', { source: 'inbox', commandId: text.id, message: 'Kimi print mode does not support interactive control; use ACP' }); continue;
+        }
         if (text === '/exit') { done('done'); return; }
         if (text === '/interrupt') continue;
         await turn(text);
@@ -513,6 +567,107 @@ function runKimi() {
       await new Promise((r) => setTimeout(r, 1000));
     }
   })();
+}
+
+function runInteractive() {
+  const { connectInteractive, interactiveRequest, interactiveResult, interactiveSandboxDecision } = require('../../src/agents/interactive-client');
+  let client, closing = false, running = false, booted = false;
+  const queue = [], pending = new Map(), resolved = new Set();
+  state.capabilities = { steer: false, questions: true, approvals: true, interrupt: true, resume: true };
+  state.pendingRequests = []; save();
+  function resolve(id, reason) {
+    const entry = pending.get(id); if (!entry) return;
+    pending.delete(id); resolved.add(entry.rpcId);
+    state.pendingRequests = [...pending.keys()]; save();
+    emit('request.resolved', { reason }, { requestId: id, turnId: state.turnId, summary: reason });
+  }
+  function invalidate(reason) { for (const id of pending.keys()) resolve(id, reason); }
+  async function pump() {
+    if (!booted || running || closing || !queue.length) return;
+    running = true; state.status = 'running'; state.turnId = randomUUID(); save();
+    try {
+      const result = await client.prompt(queue.shift());
+      if (closing) return;
+      invalidate('turn completed'); state.lastTurnStatus = result.status; finishTurn(result.text);
+    } catch (error) {
+      if (closing) return;
+      invalidate('turn failed'); state.lastTurnStatus = 'failed';
+      emit('error', { source: 'agent', message: error.message }, { turnId: state.turnId, summary: error.message });
+      finishTurn(`[broker] ${error.message}`);
+    } finally {
+      if (!closing) { running = false; state.status = 'idle'; state.turnId = null; lastActivity = Date.now(); save(); void pump(); }
+    }
+  }
+  async function control(command) {
+    if (command.v !== 1 || !command.payload || typeof command.payload !== 'object') throw Error('Invalid typed inbox command');
+    const { type, payload } = command;
+    if (['exit', 'interrupt'].includes(type)) {
+      queue.length = 0; invalidate(type);
+      if (type === 'exit') { await done('done'); return; }
+      if (running) await client.interrupt();
+      return;
+    }
+    if (!['answer', 'approve', 'deny'].includes(type)) throw Error('Unknown inbox command');
+    const entry = pending.get(payload.requestId);
+    if (!entry) throw Error('Stale or resolved request ID');
+    if ((type === 'answer') !== (entry.type === 'question')) throw Error('Wrong response type for request');
+    const result = interactiveResult(opt.agent, entry, payload, type);
+    client.respond(entry.rpcId, result); resolve(payload.requestId, type);
+  }
+  function poll() {
+    if (closing) return;
+    for (const value of takeInbox()) {
+      lastActivity = Date.now();
+      const command = typeof value === 'object' ? value : ['/exit', '/interrupt'].includes(value) ? { v: 1, type: value.slice(1), payload: {} } : null;
+      if (command) void control(command).catch(error => emit('error', { source: 'inbox', commandId: command.id, message: error.message }, { summary: error.message }));
+      else {
+        if (running) log('steer=false: message queued for next turn');
+        queue.push(value);
+      }
+    }
+    void pump();
+    if (booted && !running && !queue.length && Date.now() - lastActivity > opt.idleMin * 60000) void done('done', 0, 'idle');
+  }
+  const ticker = setInterval(poll, Number(process.env.BROKER_POLL_MS || 250));
+  const exit = done;
+  shutdownCodex = async (status, code, reason) => {
+    if (closing) return;
+    closing = true; clearInterval(ticker); invalidate('agent exited');
+    try { await client.close(); }
+    catch (error) { log(`close: ${error.message}`); }
+    shutdownCodex = null; exit(status, code, reason);
+  };
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => void done('done'));
+  client = connectInteractive({ agent: opt.agent, env: process.env, cwd: opt.cwd, model: opt.model,
+    sessionId: opt.resume ? state.sessionId : undefined, spawn, log,
+    onSession: id => { state.sessionId = id; save(); },
+    onRequest: msg => {
+      if (resolved.has(msg.id) || [...pending.values()].some(e => e.rpcId === msg.id)) return;
+      if (closing || !running || (msg.params.sessionId && msg.params.sessionId !== state.sessionId)) {
+        client.respond(msg.id, undefined, { code: -32602, message: 'No active agent turn' }); return;
+      }
+      const entry = interactiveRequest(opt.agent, msg);
+      if (!entry) { client.respond(msg.id, undefined, { code: -32601, message: 'Unsupported agent request' }); return; }
+      const auto = interactiveSandboxDecision(opt.agent, entry, opt);
+      if (auto) {
+        // Авто-одобрение/отказ по --sandbox: в events только аудит (approval.auto не будит оркестратора).
+        client.respond(msg.id, interactiveResult(opt.agent, entry, {}, auto));
+        emit('approval.auto', { ...entry.params, method: msg.method, decision: auto },
+          { turnId: state.turnId, summary: `${auto === 'approve' ? 'auto-approved' : 'auto-denied'}: ${entry.summary}` });
+        return;
+      }
+      const id = randomUUID(); pending.set(id, { ...entry, rpcId: msg.id });
+      state.pendingRequests = [...pending.keys()]; save();
+      emit(entry.type, { ...entry.params, method: msg.method }, { requestId: id, turnId: state.turnId, summary: entry.summary });
+    },
+    onUpdate: msg => { lastActivity = Date.now(); if (msg.method === 'request.cancelled') for (const [id, entry] of pending) if (entry.rpcId === msg.params.requestId) resolve(id, 'server cancelled'); },
+    onDisconnect: reason => { if (!closing) { invalidate('disconnected'); emit('error', { source: 'transport', message: reason }); void done('error', 1); } }
+  });
+  client.ready.then(() => {
+    booted = true; state.status = 'idle'; save();
+    if (!opt.resume) queue.push(fs.readFileSync(opt.prompt, 'utf8'));
+    poll();
+  }).catch(error => { emit('error', { source: 'boot', message: error.message }); void done('error', 1); });
 }
 
 }
@@ -546,22 +701,27 @@ async function runSendWait(mode, args) {
   if (!initial) { console.error(`broker.js ${mode}: нет ${stateFile} - брокер не запускался`); process.exit(1); }
   let revived;
   let spawnError;
+  const mesh = require('../../src/agents/mesh');
+  const initialEvents = new Set(mesh.readEvents(`${basePath}.events.jsonl`).map(e => e.id));
+  const sentText = mode === 'send' ? (sub.message ? fs.readFileSync(sub.message, 'utf8') : sub.text) : null;
+  const exiting = sentText?.trim() === '/exit';
   if (!alive(initial.pid)) {
     if (mode !== 'send') throw Error(`broker.js ${mode}: процесс брокера ${initial.pid} не жив (status ${initial.status})`);
-    if (!(initial.agent === 'codex' ? initial.threadId : initial.agent === 'kimi' && initial.sessionId)) throw Error('broker.js send: процесс не жив; нет сохранённого threadId/sessionId для продолжения');
+    if (!(initial.agent === 'codex' ? initial.threadId : ['kimi', 'claude'].includes(initial.agent) && initial.sessionId)) throw Error('broker.js send: процесс не жив; нет сохранённого threadId/sessionId для продолжения');
     if (!initial.launch) throw Error('broker.js send: нет сохранённых параметров запуска; перезапустите брокер явно');
     const launch = [__filename, '--resume', '--agent', initial.agent, '--name', sub.name, '--state', dir];
-    for (const [key, flag] of Object.entries({ cwd: '--cwd', model: '--model', effort: '--effort', sandbox: '--sandbox', approvalPolicy: '--approval-policy', idleMin: '--idle-min' })) {
+    for (const [key, flag] of Object.entries({ cwd: '--cwd', model: '--model', effort: '--effort', mode: '--mode', sandbox: '--sandbox', approvalPolicy: '--approval-policy', idleMin: '--idle-min' })) {
       if (initial.launch[key] !== undefined) launch.push(flag, String(initial.launch[key]));
     }
-    for (const flag of ['network', 'search']) if (initial.launch[flag]) launch.push(`--${flag}`);
+    for (const flag of ['network', 'search', 'kimiPrint']) if (initial.launch[flag]) launch.push(flag === 'kimiPrint' ? '--kimi-print' : `--${flag}`);
     for (const profile of initial.launch.claudeConfigDirs || []) launch.push('--claude-config-dir', profile);
     revived = spawn(process.execPath, launch, { detached: true, windowsHide: true, stdio: 'ignore', cwd: initial.launch.cwd, env: process.env });
     revived.on('error', error => { spawnError = error; });
     revived.unref();
   }
   if (mode === 'send') {
-    const text = sub.message ? fs.readFileSync(sub.message, 'utf8') : sub.text;
+    const text = sentText;
+    if (initial.status === 'running' && initial.capabilities?.steer === false && !['/exit', '/interrupt'].includes(text.trim())) console.error('[broker] steer=false: message queued for the next turn');
     const inboxDir = `${basePath}.inbox`;
     fs.mkdirSync(inboxDir, { recursive: true });
     const tmp = path.join(inboxDir, `.tmp-${process.pid}-${Date.now()}`);
@@ -576,7 +736,11 @@ async function runSendWait(mode, args) {
     const s = readState() ?? {};
     if (spawnError) throw spawnError;
     // Конец хода: turns вырос и агент больше не в работе. Steer во время хода тоже дождётся конца.
-    if ((s.turns || 0) > baseline && ['idle', 'done', 'error'].includes(s.status)) {
+    const events = mesh.readEvents(`${basePath}.events.jsonl`);
+    const exitEvent = exiting && events.find(e => !initialEvents.has(e.id) && e.type === 'agent.exited' && e.payload?.pid === s.pid);
+    if (exiting ? exitEvent : (s.turns || 0) > baseline && ['idle', 'done', 'error'].includes(s.status)) {
+      const completion = events.find(e => e.id === s.lastCompletionEvent) || events.findLast(e => !initialEvents.has(e.id) && e.type === 'turn.completed');
+      mesh.ackDelivered(dir, [completion?.id, exitEvent?.id].filter(Boolean));
       process.stdout.write(fs.existsSync(`${basePath}.out.md`) ? fs.readFileSync(`${basePath}.out.md`, 'utf8') : '');
       process.exit(0);
     }

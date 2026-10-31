@@ -1,6 +1,25 @@
 # Интерактивная сеть агентов agent-kit
 
-Дата исследования: 31 октября 2026. Статус: итерации 1–2 реализованы и проверены fake transport; live-приёмка Claude idle wake остаётся открытой. Ниже после инструкции подключения сохранено исходное исследование остальных итераций.
+Обновлено 31 октября 2026. Реализованы Codex app-server, Kimi ACP и Claude stream-json агенты, доставка оркестратору через Codex daemon и Kimi web. Live-прогоны: Kimi 2.3.2, Claude 2.1.316, Codex 0.166.0, временные home/config и loopback provider, без реальных аккаунтов. Автономный Claude idle wake и отображение в TUI остаются отдельной приёмкой. Ниже текущая инструкция и матрица; исходное исследование сохранено как историческое.
+
+## Текущие адаптеры и проверки
+
+- `--agent kimi` запускает один `kimi acp`: initialize, session/new либо session/load по сохранённому sessionId, session/prompt и session/update. Завершение prompt RPC создаёт turn.completed. Session/request_permission и elicitation/create удерживаются до answer/approve/deny; approve выбирает только allow_once. Interrupt отправляет session/cancel, exit вызывает session/close. Старый режим выбирается явно через `--kimi-print`, без скрытого fallback после ошибки или auth_required.
+- `--agent claude` использует `claude -p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio`. Initialize/control requests, can_use_tool и AskUserQuestion обслуживаются теми же командами. Session_id сохраняется, воскрешение использует --resume. Result оставляет stdin открытым. Interrupt идёт control request, exit закрывает процесс; bypass permissions не используется.
+- Оба адаптера объявляют `steer=false`: busy send записывается в log как следующий ход. Control-команды обрабатываются независимо от очереди prompt. Неподдержанные возможности print-режима дают ошибку.
+- Если команда запуска унаследовала `CODEX_THREAD_ID`, брокер сохраняет `state.orchestrator={agent:"codex",id:...}`. Отдельный observer подключается через app-server proxy, проверяет thread/loaded/list, подписывается через thread/resume без смены настроек и отправляет turn/steer с expectedTurnId либо turn/start. На server requests оркестратора он не отвечает. Отсутствующий на daemon owner даёт error с инструкцией запустить TUI на общем daemon через `codex --remote`. Embedded TUI по одному ID не подключается.
+- Kimi terminal wake невозможен выбранным штатным путём. Для server-owned сессии задаются `KIMI_SESSION_ID`, `AGENT_MESH_KIMI_URL`, при необходимости `AGENT_MESH_KIMI_TOKEN`. GET session и `/api/v2/sessions` проверяют, что owner уже живёт в этом сервере и имеет `activity.model`; холодная/terminal сессия не усыновляется. Затем события уходят POST `/api/v1/sessions/ID/prompts`; terminal lock/неизвестная сессия дают ошибку, takeover не вызывается. Token не сохраняется в state. В Kimi 2.3.2 новой web-сессии требуется назначить модель через POST profile, даже при наличии default_model в config.
+- `send/wait` подтверждают точный turn.completed, который они напечатали; `send --text /exit` также подтверждает соответствующий agent.exited и завершается без нового хода. Разреженные ACK находятся в `cursor.delivered`, не скрывают более ранние вопросы или события соседей. ACK доступен при работающем waiter; вложенный брокер подтверждает также активный курсор родительской scratchpad. Состояние записывается атомарно.
+
+Короткие команды: [README брокера](../scripts/agents/README.md). Инструкция для Codex-оркестратора: [AGENTS snippet](../templates/mesh-orchestrator.md). Глобальные инструкции и профили автоматически не устанавливаются.
+
+ID владельца сохраняется также в совместимом поле `state.owner`; `state.orchestrator` хранит тип и маршрут доставки.
+
+Live: `node scripts/agents/smoke-mesh.js --live`, либо `--only kimi|claude|codex|web|claude-kimi`. При необходимости задайте AGENT_BROKER_CODEX/KIMI/CLAUDE абсолютными путями. Launcher использует allowlist окружения, свои home/config под `.native/mesh-*`, фальшивые ключи и loopback HTTP provider. Артефакты и results.json сохраняются. Короткий путь нужен Windows daemon из-за SUN_LEN сокета. `npm.cmd test` выполняет npm test без заблокированного PowerShell npm.ps1.
+
+Проверено живыми CLI: Kimi ACP question→answer, approval→deny/approve (отклонённая команда не исполняется, одобренная исполняется), cancel, close/load и воскрешение; Claude question→answer, deny, interrupt, несколько ходов и --resume; настоящий Claude Bash вызывает answer/deny/approve брокера для Kimi; настоящий Codex-брокер наследует CODEX_THREAD_ID и его completion запускает ход владельца на изолированном daemon; Kimi web POST события запускает модель и возвращает ответ. Детерминированный loopback проверяет транспорт, а не качество реальной модели.
+
+Не проверены живым TUI: Claude final→idle→asyncRewake→самостоятельный ответ, сохранность набираемого текста Codex, одновременный Enter/review/compact, reconnect владельца и все девять пар целиком. Для этого нужны интерактивные TUI; launcher headless. Fake-тесты покрывают busy/idle routing, passive server requests, stale IDs и ACK. Embedded Codex и Kimi terminal помечены X и не заменены другим способом ввода.
 
 ## Подключение итераций 1–2
 
@@ -57,6 +76,8 @@ Hook читает `session_id`, `transcript_path`, `cwd` из stdin и вычи�
 «Доставлено» имеет три разных значения: записано брокером; принято клиентом; обработано моделью. Ни вывод строки в терминал, ни изменение state-файла, ни успешная запись в MCP transport сами по себе не доказывают последнее.
 
 ## Область и доказательства
+
+Этот раздел и последующие протокольные исследования описывают исходную версию до реализации. Текущее состояние находится в начале документа и в обновлённой матрице ниже.
 
 Прочитаны текущие `scripts/agents/broker.js`, `src/agents/codex-client.js`, их вызывающие места и тесты, раздел README о брокере; целевые исходники дерева `.native/work/check-0.166/codex-rust-v0.166.0/codex-rs/`; официальные документы Claude и обоих поколений Kimi. Далее `N/` означает этот каталог `codex-rs/`.
 
@@ -204,15 +225,15 @@ Server API позволяет вести server-owned сессию, подпис
 
 ## Матрица оркестратор × агент
 
-Статусы описывают **проект на существующих интерфейсах**, не готовность нынешнего брокера. `R` = подтверждённый протокол при выполненных условиях; `E` = preview/version gate или необходимый runtime тест; `X` = выбранный штатный путь не обеспечивает требование. Во всех клетках оркестратор→агент идёт командами брокера; ответ на question/approval — ответ исходному запросу, не обычный prompt.
+Текущее состояние реализации. **R** = готово и покрыто тестами; «live» отдельно указывает проверенный сценарий. **E** = указанная часть не проверена живым клиентом. **X** = штатный путь невозможен/не поддержан. Готовность транспорта не равна приёмке всех режимов TUI. Ответ на question/approval идёт исходному запросу, не обычным prompt.
 
 | Оркестратор | Агент Codex | Агент Kimi | Агент Claude |
 | --- | --- | --- | --- |
-| Claude Code | A→O: channel **E** / Monitor **E** / asyncRewake **R**. O→A: app-server start/steer/answer/approve/interrupt **R** | A→O: те же Claude wake adapters. O→A: старый Wire **E**, print только следующий ход **X** для полной интерактивности; новый API/ACP отдельная проверка | A→O: те же Claude adapters. O→A: stream-json/resume **R**, control requests **E**, гарантированный mid-turn steer **X** |
-| Codex CLI 0.166 | A→O: тот же server + start/steer **R**, отображение в TUI **E** до прогона; embedded через внешний proxy **X**. O→A: полный app-server протокол **R** | A→O: общий Codex server, те же условия. O→A: Wire **E** / print **X** для полной интерактивности | A→O: общий Codex server, те же условия. O→A: stream-json/control **E**, следующий ход **R**, steer **X** без отдельного доказательства |
-| Kimi CLI | A→O: новый tracked background waiter **E**; server-owned orchestrator **E**; произвольный старый Shell UI по `-S` **X**. O→A: app-server **R** | A→O: те же Kimi ограничения. O→A: Wire **E**; print **X** для вопросов/прав/steer | A→O: те же Kimi ограничения. O→A: stream-json/control **E**, следующий ход **R**, steer **X** |
+| Claude Code | **R** waiter/hook и Codex API. **E** эта пара целиком и автономный idle wake в TUI | **R**, **live**: Claude Bash читает events, вызывает answer/approve/deny Kimi ACP, получает продолжение. **E** автономный idle wake | **R**, Claude-агент отдельно **live**: ход/question/deny/interrupt/resume. **E** эта пара целиком и idle wake. Steer **X**, очередь следующего хода **R** |
+| Codex daemon 0.166 | **R**, **live**: CODEX_THREAD_ID → настоящий Codex-брокер → completion → ход владельца на том же daemon; busy turn/steer с expectedTurnId. Passive requests проверены fake. **E** TUI/Enter/compact/reconnect. Embedded **X** | **R**, wake daemon и ACP проверены **live** отдельно. **E** эта пара целиком. Kimi steer **X**, next **R** | **R**, wake daemon и Claude control проверены **live** отдельно. **E** эта пара целиком. Claude steer **X**, next **R** |
+| Kimi web 2.3.2 | **R** POST prompt server-owned owner, wake/ответ **live** отдельно. **E** пара с Codex целиком. Terminal owner **X** | **R**, web wake/ответ и ACP question/approval/resume **live** отдельно. **E** пара целиком. Terminal owner/ACP steer **X** | **R**, web wake/ответ и Claude-агент **live** отдельно. **E** пара целиком. Terminal owner/Claude steer **X** |
 
-Между любыми двумя агентами сообщение маршрутизируется тем же брокером по `to`; получать его должен существующий agent adapter. Запрос решения адресуется владельцу задачи, а не произвольному соседу. Для agent→agent не нужен дополнительный TUI wake, если процесс-получатель принадлежит брокеру.
+Запрос решения адресуется сохранённому оркестратору. Прямой router `to` между произвольными соседними агентами не реализован: для этого оркестратор вызывает send конкретного брокера. События сохраняются до завершения наблюдателя; RPC ACK/HTTP принятие означают принятие транспортом, а не подтверждение обработки моделью.
 
 ## Как удерживать запрос Codex до ответа
 
