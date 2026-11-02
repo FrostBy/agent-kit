@@ -235,6 +235,7 @@ test('installer handles multiline TOML safely, and CLI installation/removal stay
   const installed = tomlBlock(before, '# BEGIN AGENT-KIT SESSION-SYNC\n# owned\n# END AGENT-KIT SESSION-SYNC\n');
   assert.equal(tomlBlock(installed, ''), before);
   assert.throws(() => tomlBlock('prompt = """\n# BEGIN AGENT-KIT SESSION-SYNC\n# END AGENT-KIT SESSION-SYNC\n"""', ''), /inside TOML/);
+  assert.throws(() => tomlBlock('# BEGIN AGENT-KIT SESSION-SYNC\nprompt = """\n# END AGENT-KIT SESSION-SYNC\n"""\n', ''), /inside TOML/);
   const { spawnSync } = require('node:child_process');
   const script = path.resolve(__dirname, '../scripts/agents/sync.js');
   for (const command of ['install', 'install', 'uninstall', 'uninstall']) {

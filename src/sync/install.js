@@ -16,13 +16,14 @@ function tomlBlock(text, block) {
   if (begins.length) {
     const start = begins[0].index, end = ends[0].index + ends[0][0].length;
     let quote = '', triple = false;
-    for (let i = 0; i < start; i++) {
+    for (let i = 0; i < end; i++) {
+      if (i === start && quote) throw Error('Sync markers inside TOML string');
       const char = text[i];
       if (quote) {
         if (quote === '"' && char === '\\') { i++; continue; }
         if (triple && text.slice(i, i + 3) === quote.repeat(3)) { quote = ''; triple = false; i += 2; }
         else if (!triple && char === quote) quote = '';
-      } else if (char === '#') { while (i < start && text[i] !== '\n') i++; }
+      } else if (char === '#') { while (i < end && text[i] !== '\n') i++; }
       else if (char === '"' || char === "'") { quote = char; triple = text.slice(i, i + 3) === char.repeat(3); if (triple) i += 2; }
     }
     if (quote) throw Error('Sync markers inside TOML string');

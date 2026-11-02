@@ -539,11 +539,14 @@ test('archive command is dry-run by default and archives only old idle broker se
   }
   rollout('eligible', 'claude-agent-broker'); rollout('running', 'claude-agent-broker', true);
   rollout('recent', 'claude-agent-broker', false, true); rollout('native', 'codex-tui'); rollout('live', 'claude-agent-broker');
+  rollout('contaminated', 'claude-agent-broker'); rollout('legacy', 'codex-tui');
+  for (const id of ['eligible', 'running', 'recent', 'legacy'])
+    fs.writeFileSync(path.join(f.root, `${id}.state.json`), JSON.stringify({ agent: 'codex', threadId: id, status: 'done' }));
   fs.writeFileSync(path.join(f.root, 'live.state.json'), JSON.stringify({ agent: 'codex', threadId: 'live', pid: process.pid, status: 'idle' }));
   const options = { home: f.root, env: f.processMock.env, stateDirs: [f.root], log: () => {}, connect: args => connectProxy({ ...args, spawn: f.spawn }) };
-  assert.equal((await archiveSessions(options)).candidates, 1); assert.equal(f.children.length, 0);
-  const result = await archiveSessions({ ...options, apply: true }); assert.equal(result.archived, 1);
-  assert.deepEqual(f.requests.filter(r => r.method === 'thread/archive').map(r => r.params.threadId), ['eligible']);
+  assert.deepEqual((await archiveSessions(options)).candidateIds.sort(), ['eligible', 'legacy']); assert.equal(f.children.length, 0);
+  const result = await archiveSessions({ ...options, apply: true }); assert.equal(result.archived, 2);
+  assert.deepEqual(f.requests.filter(r => r.method === 'thread/archive').map(r => r.params.threadId).sort(), ['eligible', 'legacy']);
   fs.writeFileSync(path.join(f.root, 'archived.state.json'), JSON.stringify({ agent: 'codex', threadId: 'missing-rollout', status: 'idle', archived: true }));
   assert(!broker.agents(f.root, 'codex').some(agent => agent.id === 'missing-rollout'));
   assert.doesNotThrow(() => require('../src/sources/codex').load(f.root, Date.now(), f.root, () => true, f.root));
@@ -605,9 +608,10 @@ test('archive excludes poisoned mirror IDs and rechecks registries immediately b
   for (const id of ['mirror', 'broker', 'racing']) {
     const file = path.join(sessions, `rollout-${id}.jsonl`);
     fs.writeFileSync(file, JSON.stringify({ timestamp: old.toISOString(), type: 'session_meta', payload: { id, originator: 'claude-agent-broker', source: 'vscode' } }) + '\n'); fs.utimesSync(file, old, old);
+    fs.writeFileSync(path.join(f.root, `${id}.state.json`), JSON.stringify({ agent: 'codex', threadId: id, status: 'done' }));
   }
   writeRegistry(['mirror']);
-  const args = { home: f.root, env: f.processMock.env, claudeConfigDirs: [profile], log: () => {}, connect: opts => connectProxy({ ...opts, spawn: f.spawn }) };
+  const args = { home: f.root, env: f.processMock.env, stateDirs: [f.root], claudeConfigDirs: [profile], log: () => {}, connect: opts => connectProxy({ ...opts, spawn: f.spawn }) };
   const dry = await archiveSessions(args); assert(dry.protectedSync.includes('mirror')); assert(!dry.candidateIds.includes('mirror')); assert.equal(f.children.length, 0);
   f.answers['thread/read'] = msg => { if (msg.params.threadId === 'racing') writeRegistry(['mirror', 'racing']); return { result: {} }; };
   await archiveSessions({ ...args, apply: true });

@@ -14,7 +14,7 @@ function* files(dir) {
     else if (entry.isFile() && entry.name.endsWith('.jsonl')) yield file;
   }
 }
-async function inspect(file) {
+async function inspect(file, knownIds) {
   const before = fs.statSync(file), stream = fs.createReadStream(file), lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
   let meta, at = before.mtimeMs, running = false;
   try {
@@ -23,7 +23,7 @@ async function inspect(file) {
       const row = JSON.parse(line), p = row.payload;
       if (row.type === 'session_meta') {
         meta = p;
-        if (p.originator !== 'claude-agent-broker') return null;
+        if (!knownIds.has(p?.id)) return null;
       }
       const time = Date.parse(row.timestamp); if (Number.isFinite(time)) at = Math.max(at, time);
       if (row.type === 'event_msg') {
@@ -33,12 +33,12 @@ async function inspect(file) {
     }
     const after = fs.statSync(file);
     if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) return null;
-    return meta?.originator === 'claude-agent-broker' && /^[\w-]+$/.test(meta.id) ? { id: meta.id, at, running, file } : null;
+    return knownIds.has(meta?.id) ? { id: meta.id, at, running, file } : null;
   } catch { return null; }
   finally { lines.close(); stream.destroy(); }
 }
 function protectedThreads(stateDirs) {
-  const ids = new Set();
+  const ids = new Set(), knownIds = new Set();
   for (const dir of stateDirs) {
     const walk = root => {
       let entries; try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
@@ -47,7 +47,8 @@ function protectedThreads(stateDirs) {
         if (entry.isDirectory()) walk(file);
         else if (entry.isFile() && entry.name.endsWith('.state.json')) try {
           const s = JSON.parse(fs.readFileSync(file, 'utf8'));
-          if (s.agent !== 'codex' || !s.threadId) continue;
+          if (s.agent !== 'codex' || typeof s.threadId !== 'string' || !/^[\w-]+$/.test(s.threadId)) continue;
+          knownIds.add(s.threadId);
           let live = false;
           if (Number.isInteger(s.pid) && s.pid > 0) { try { process.kill(s.pid, 0); live = true; } catch (e) { live = e.code !== 'ESRCH'; } }
           if (live || s.status === 'running') ids.add(s.threadId);
@@ -55,17 +56,17 @@ function protectedThreads(stateDirs) {
       }
     }; walk(dir);
   }
-  return ids;
+  return { ids, knownIds };
 }
 async function archiveSessions({ home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), minutes = 60, apply = false, stateDirs = [], claudeConfigDirs = [], env = process.env, connect = connectProxy, log = console.log, now = Date.now() } = {}) {
   if (!Number.isFinite(minutes) || minutes <= 0) throw Error('--minutes must be positive');
   // Без --state живые брокеры не защищены: по умолчанию защищаем корень scratchpad Claude Code.
   const scratchpad = path.join(os.tmpdir(), 'claude');
   const stateDirsAll = fs.existsSync(scratchpad) && !stateDirs.includes(scratchpad) ? [scratchpad, ...stateDirs] : stateDirs;
-  const protectedIds = protectedThreads(stateDirsAll), mirrors = syncThreads({ env, claudeConfigDirs }), rows = new Map();
+  const { ids: protectedIds, knownIds } = protectedThreads(stateDirsAll), mirrors = syncThreads({ env, claudeConfigDirs }), rows = new Map();
   for (const id of mirrors) log(`Protected sync thread: ${id}`);
   for (const file of files(path.join(home, 'sessions'))) {
-    const row = await inspect(file); if (!row) continue;
+    const row = await inspect(file, knownIds); if (!row) continue;
     const old = rows.get(row.id);
     if (old) { old.at = Math.max(old.at, row.at); old.running ||= row.running; old.files.push(file); }
     else rows.set(row.id, { ...row, files: [file] });
@@ -82,8 +83,9 @@ async function archiveSessions({ home = process.env.CODEX_HOME || path.join(os.h
     client.notify('initialized', {});
     for (const row of candidates) {
       try {
-        const current = await Promise.all(row.files.map(inspect));
-        if (protectedThreads(stateDirsAll).has(row.id) || syncThreads({ env, claudeConfigDirs }).has(row.id) || current.some(s => !s || s.running || Date.now() - s.at <= minutes * 60000)) continue;
+        const state = protectedThreads(stateDirsAll);
+        const current = await Promise.all(row.files.map(file => inspect(file, state.knownIds)));
+        if (state.ids.has(row.id) || syncThreads({ env, claudeConfigDirs }).has(row.id) || current.some(s => !s || s.running || Date.now() - s.at <= minutes * 60000)) continue;
         const live = await client.request('thread/read', { threadId: row.id, includeTurns: false });
         if (live.thread?.status?.type === 'active') continue;
         if (syncThreads({ env, claudeConfigDirs }).has(row.id)) continue;
