@@ -110,7 +110,7 @@ function brokerStates(dir) {
 function hasLiveBroker(dir) {
   return brokerStates(dir).some(state => state.unreadable || (!['done', 'error'].includes(state.status) && alive(state.pid)));
 }
-function detectDeaths(dir, since = cursor(dir).sessionStartedAt ?? Date.now(), observed = new Set()) {
+function detectDeaths(dir, since = cursor(dir).sessionStartedAt ?? 0, observed = new Set()) {
   for (const state of brokerStates(dir)) {
     if (['done', 'error'].includes(state.status) || !state.pid) continue;
     const identity = `${state.base}:${state.pid}`;
@@ -133,7 +133,7 @@ async function nextEvent(dir, { timeoutMin = 120, pollMs = 250, signal, wakeOnly
   const release = lock(dir), deadline = Date.now() + timeoutMin * 60000;
   try {
     if (sessionStartedAt !== undefined) updateCursor(dir, seen => { seen.sessionStartedAt = sessionStartedAt; seen.liveBrokers = []; });
-    const previous = cursor(dir), since = sessionStartedAt ?? previous.sessionStartedAt ?? Date.now();
+    const previous = cursor(dir), since = sessionStartedAt ?? previous.sessionStartedAt ?? 0;
     const observed = new Set(previous.liveBrokers || []);
     for (;;) {
       if (wakeOnly) {
