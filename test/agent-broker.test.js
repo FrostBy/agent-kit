@@ -68,6 +68,8 @@ test('missing Codex home exits with a sandbox error before spawning any proxy', 
   for (const agent of ['codex', 'kimi']) {
     const f = fixture(t, agent);
     delete f.processMock.env.HOME; delete f.processMock.env.USERPROFILE;
+    const original = f.context.require;
+    f.context.require = name => name === '../../src/agents/model-policy' ? { resolve: options => original(name).resolve({ ...options, env: { HOME: f.root } }) } : original(name);
     if (agent === 'kimi') f.processMock.env.CODEX_THREAD_ID = 'owner';
     f.run(); await settle();
     assert.equal(f.children.length, 0); assert.deepEqual(f.exits, [1]);
@@ -231,6 +233,7 @@ test('Codex broker keeps state format and exclusion policy; turns, inbox steerin
   assert.equal(f.children[0].options.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, undefined);
   const start = f.requests.find(r => r.method === 'thread/start');
   assert.equal(start.params.config.shell_environment_policy.set.SESSION_SYNC_BROKER, '1');
+  assert.equal(start.params.threadSource, 'agent-kit-broker');
   assert.equal(f.state().threadId, 'thread-fixture'); assert.equal(f.state().status, 'running');
   assert.equal(broker.agents(f.root, 'codex')[0].id, 'thread-fixture');
   fs.writeFileSync(path.join(f.root, 'worker.inbox', '001'), 'steer fixture'); f.intervals[0](); await settle();
@@ -639,7 +642,7 @@ test('send puts the message into the inbox and prints the finished turn output',
   fs.mkdirSync(path.join(root, 'worker.inbox'));
   fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'codex', status: 'idle', turns: 1, pid: process.pid }));
   const script = path.resolve(__dirname, '../scripts/agents/broker.js');
-  const env = { ...process.env, BROKER_POLL_MS: '50' };
+  const env = { ...process.env, HOME: root, USERPROFILE: root, BROKER_POLL_MS: '50' };
   const child = spawn(process.execPath, [script, 'send', '--name', 'worker', '--state', root, '--text', 'hello agent', '--timeout-min', '1'], { env });
   let stdout = '', stderr = '';
   child.stdout.on('data', (d) => { stdout += d; }); child.stderr.on('data', (d) => { stderr += d; });
@@ -677,7 +680,7 @@ test('send and wait count an errored finished turn as turn completion', async t 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'worker.inbox'));
   const script = path.resolve(__dirname, '../scripts/agents/broker.js');
-  const env = { ...process.env, BROKER_POLL_MS: '50' };
+  const env = { ...process.env, HOME: root, USERPROFILE: root, BROKER_POLL_MS: '50' };
   fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'codex', status: 'idle', turns: 1, pid: process.pid }));
   const child = spawn(process.execPath, [script, 'send', '--name', 'worker', '--state', root, '--text', 'x', '--timeout-min', '1'], { env });
   let stdout = '', stderr = '';
@@ -709,7 +712,7 @@ test('send and wait exit 1 with a clear message on a dead broker pid or turn tim
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-kit-send-dead-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const script = path.resolve(__dirname, '../scripts/agents/broker.js');
-  const env = { ...process.env, BROKER_POLL_MS: '20' };
+  const env = { ...process.env, HOME: root, USERPROFILE: root, BROKER_POLL_MS: '20' };
   fs.writeFileSync(path.join(root, 'worker.state.json'), JSON.stringify({ agent: 'codex', status: 'idle', turns: 3, pid: 999999999 }));
   for (const mode of ['wait', 'send']) {
     const args = [script, mode, '--name', 'worker', '--state', root];
@@ -747,7 +750,7 @@ test('send revives detached Codex/Kimi with saved settings and delivers only the
     const stale = require('../src/agents/mesh').eventWriter(path.join(f.root, 'worker'), 'worker')('question', {}, { requestId: 'stale' });
     let output = '', spawned;
     let exitResolve; const exited = new Promise(resolve => { exitResolve = resolve; });
-    const sendProcess = { env: { BROKER_POLL_MS: '1' }, pid: 555, execPath: process.execPath,
+    const sendProcess = { env: { HOME: f.root, USERPROFILE: f.root, BROKER_POLL_MS: '1' }, pid: 555, execPath: process.execPath,
       argv: ['node', 'broker.js', 'send', '--name', 'worker', '--state', f.root, '--text', 'new message', '--timeout-min', '0.01'],
       stdout: { write: text => { output += text; } }, exit(code) { exitResolve(code); throw Error('test exit'); } };
     vm.runInNewContext(source, { require: name => name === 'node:child_process' ? { spawn(command, args, options) {
@@ -804,4 +807,96 @@ test('owner death exits a running broker and SessionEnd exits both running agent
     await settle(); assert.deepEqual(f.exits, [0]);
     assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).status, 'done');
   }
+});
+
+test('opencode uses interactive client and restores model and cwd on resume', async t => {
+  const f = fixture(t, 'opencode'), config = path.join(f.root, '.config', 'agent-kit');
+  const executable = path.join(f.root, 'native-opencode.exe');
+  fs.mkdirSync(config, { recursive: true }); fs.writeFileSync(path.join(config, 'agents.json'), JSON.stringify({ connectors: { opencode: { enabled: true, models: ['model-one'], executable } } }));
+  let options; const original = f.context.require;
+  f.context.require = name => name === '../../src/agents/interactive-client' ? { ...original(name), connectInteractive(config) {
+    options = config; config.onSession('session-saved');
+    return { ready: Promise.resolve(), prompt: async () => ({ text: 'ok', status: 'completed' }), close: async () => {} };
+  } } : original(name);
+  f.processMock.argv.push('--model', 'model-one'); f.run(); await settle();
+  assert.equal(options.agent, 'opencode'); assert.equal(options.model, 'model-one'); assert.equal(f.state().connector, 'opencode');
+  assert.equal(options.env.AGENT_BROKER_OPENCODE, executable);
+  const saved = f.state(); saved.status = 'done'; saved.pid = 999999999; fs.writeFileSync(path.join(f.root, 'worker.state.json'), JSON.stringify(saved));
+  const resumed = fixture(t, 'opencode'); resumed.context.require = f.context.require;
+  resumed.processMock.env.HOME = f.root; resumed.processMock.env.USERPROFILE = f.root;
+  resumed.processMock.argv = ['node', 'broker.js', '--agent', 'opencode', '--name', 'worker', '--state', f.root, '--resume'];
+  for (const args of [['--model', 'different'], ['--agent', 'codex'], ['--cwd', resumed.root]]) {
+    resumed.processMock.argv.push(...args); assert.throws(() => vm.runInNewContext(source, { ...resumed.context }, { filename: 'broker.js' }), /Cannot change/); resumed.processMock.argv.splice(-args.length);
+  }
+  resumed.run(); await settle();
+  assert.equal(options.sessionId, 'session-saved'); assert.equal(options.cwd, f.root); assert.equal(options.model, 'model-one');
+  assert.equal(f.state().launch.model, 'model-one');
+});
+
+test('send checks saved opencode policy before revival', async t => {
+  const f = fixture(t, 'opencode'), config = path.join(f.root, '.config', 'agent-kit');
+  fs.mkdirSync(config, { recursive: true });
+  const policy = path.join(config, 'agents.json');
+  fs.writeFileSync(policy, JSON.stringify({ connectors: { opencode: { enabled: true, models: ['model-one'] } } }));
+  const launch = { agent: 'opencode', connector: 'opencode', model: 'model-one', cwd: f.root };
+  fs.writeFileSync(path.join(f.root, 'worker.state.json'), JSON.stringify({ agent: 'opencode', connector: 'opencode', sessionId: 'saved', status: 'done', pid: 999999999, launch }));
+  let spawned = 0, error = '';
+  const runSend = () => vm.runInNewContext(source, { require: name => name === 'node:child_process' ? { spawn(command, args) {
+    spawned++; assert.equal(args[args.indexOf('--agent') + 1], 'opencode'); assert.equal(args[args.indexOf('--model') + 1], 'model-one');
+    throw Error('spawn captured');
+  } } : require(name.startsWith('.') ? path.resolve(__dirname, '../scripts/agents', name) : name),
+  process: { env: { HOME: f.root }, argv: ['node', 'broker.js', 'send', '--name', 'worker', '--state', f.root, '--text', 'test'], exitCode: 0 },
+  __filename: path.resolve(__dirname, '../scripts/agents/broker.js'), console: { error: message => { error = message; } }, Buffer });
+  runSend(); await settle(); assert.equal(spawned, 1); assert.match(error, /spawn captured/);
+  fs.writeFileSync(policy, JSON.stringify({ connectors: { opencode: { enabled: false, models: ['model-one'] } } }));
+  runSend(); await settle(); assert.equal(spawned, 1); assert.match(error, /disabled/);
+});
+
+test('policy changes reject inbox turns and preserve controls', async t => {
+  for (const agent of ['codex', 'kimi', 'claude']) {
+    const f = fixture(t, agent), config = path.join(f.root, '.config', 'agent-kit');
+    let prompts = 0, complete; const original = f.context.require;
+    if (agent === 'claude') f.context.require = name => name === '../../src/agents/interactive-client' ? { ...original(name), connectInteractive() {
+      return { ready: Promise.resolve(), prompt() { prompts++; return new Promise(resolve => { complete = resolve; }); }, interrupt: async () => {}, close: async () => {} };
+    } } : original(name);
+    f.run(); await settle();
+    assert.equal(agent === 'claude' ? prompts : f.children.length, 1);
+    fs.mkdirSync(config, { recursive: true }); fs.writeFileSync(path.join(config, 'agents.json'), JSON.stringify({ connectors: { [agent]: { enabled: false } } }));
+    fs.writeFileSync(path.join(f.root, 'worker.inbox', 'next'), 'blocked message');
+    if (agent === 'kimi') { f.children[0].child.emit('exit', 0); await settle(); f.timers.at(-1)(); }
+    else { f.intervals[0](); if (agent === 'claude') complete({ status: 'completed', text: 'first' }); }
+    await settle(); await settle();
+    if (agent === 'codex') { assert(!f.requests.some(r => r.method === 'turn/steer')); }
+    else if (agent === 'kimi') assert.equal(f.children.length, 1);
+    else assert.equal(prompts, 1);
+    assert.equal(f.state().lastTurnStatus, 'failed'); assert.match(fs.readFileSync(path.join(f.root, 'worker.out.md'), 'utf8'), /disabled/);
+    if (agent === 'codex') { f.children[0].child.send({ method: 'turn/completed', params: { turn: { status: 'completed' } } }); await settle();
+      const count = f.requests.filter(r => r.method === 'turn/start').length;
+      fs.writeFileSync(path.join(f.root, 'worker.inbox', 'again'), 'blocked again'); f.intervals[0](); await settle();
+      assert.equal(f.requests.filter(r => r.method === 'turn/start').length, count); assert.equal(f.state().lastTurnStatus, 'failed'); }
+    fs.writeFileSync(path.join(f.root, 'worker.inbox', 'exit'), '/exit');
+    if (agent === 'kimi') f.timers.at(-1)(); else f.intervals[0](); await settle();
+    assert.deepEqual(f.exits, [0]);
+  }
+});
+
+test('Kimi print passes model only when explicitly selected', t => {
+  for (const model of [undefined, 'example-model']) {
+    const f = fixture(t, 'kimi'); if (model) f.processMock.argv.push('--model', model); f.run();
+    const args = Array.from(f.children[0].args);
+    if (model) assert.equal(args[args.indexOf('-m') + 1], model); else assert(!args.includes('-m'));
+  }
+});
+
+test('live send checks policy before writing inbox while controls bypass it', async t => {
+  const f = fixture(t, 'codex'), config = path.join(f.root, '.config', 'agent-kit'); fs.mkdirSync(config, { recursive: true });
+  fs.writeFileSync(path.join(config, 'agents.json'), JSON.stringify({ connectors: { codex: { enabled: false } } }));
+  fs.writeFileSync(path.join(f.root, 'worker.state.json'), JSON.stringify({ agent: 'codex', pid: process.pid, status: 'idle', launch: { connector: 'codex', cwd: f.root } }));
+  let error = '', spawned = 0;
+  const run = text => vm.runInNewContext(source, { require: name => name === 'node:child_process' ? { spawn() { spawned++; } } : name === 'node:timers/promises' ? { setTimeout: async () => { throw Error('stop polling'); } } : require(name.startsWith('.') ? path.resolve(__dirname, '../scripts/agents', name) : name),
+    process: { env: { HOME: f.root }, argv: ['node', 'broker.js', 'send', '--name', 'worker', '--state', f.root, '--text', text], stdout: { write() {} }, exitCode: 0 },
+    __filename: path.resolve(__dirname, '../scripts/agents/broker.js'), console: { error: value => { error = value; } }, Buffer });
+  run('blocked'); await settle(); assert.match(error, /disabled/); assert.equal(spawned, 0); assert(!fs.existsSync(path.join(f.root, 'worker.inbox')));
+  for (const control of ['/interrupt', '/exit']) { run(control); await settle(); const files = fs.readdirSync(path.join(f.root, 'worker.inbox')).filter(name => !name.startsWith('.')); assert(files.some(name => fs.readFileSync(path.join(f.root, 'worker.inbox', name), 'utf8') === control)); for (const name of files) fs.rmSync(path.join(f.root, 'worker.inbox', name)); }
+  assert.equal(spawned, 0);
 });

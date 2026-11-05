@@ -95,6 +95,8 @@ node statusline.js --codex --preview    # sample umbrella with three repositorie
 
 ## Agent broker and session sync (experimental)
 
+Global and project [model policies](docs/agent-models.md) control connector priority and allowed models. `--agent opencode` runs the OpenCode V2 CLI through ACP, including models restricted to the OpenCode client.
+
 **Broker.** Run Codex (shared app-server), Kimi (`kimi acp`) or Claude (persistent stream-json) as background workers. Questions, permissions, cancellation and session resurrection use the same broker commands. Codex and server-owned Kimi web orchestrators can receive events directly; Claude supports the event waiter and optional wake hook. Kimi/Claude queue busy messages for the next turn (`steer=false`). Point `--state` at the scratchpad the statusline reads. `send/wait` print and ACK the result; `send` revives an exited worker from its saved session. See the [short broker README](scripts/agents/README.md) for commands, executable overrides, the legacy `--kimi-print` flag and isolated live tests.
 
 ```sh

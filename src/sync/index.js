@@ -19,6 +19,7 @@ const processCache = require('./process-cache');
 const { version } = require('./versions');
 const { createCodexMirror } = require('./codex-mirror');
 const MARK = '[session-sync:v2:';
+const ELIGIBILITY_VERSION = 2;
 const digest = x => createHash('sha256').update(x).digest('hex');
 const other = kind => kind === 'claude' ? 'codex' : 'claude';
 const same = (a, b) => { const norm = x => process.platform === 'win32' ? path.resolve(x).toLowerCase() : path.resolve(x); return norm(a) === norm(b); };
@@ -366,7 +367,11 @@ async function eligible(kind, input, records, env = process.env, interactive = (
   if (env.SESSION_SYNC_EXCLUDE || env.SESSION_SYNC_BROKER || input.agent_id || input.isSidechain || input.is_sidechain) return false;
   if (kind === 'codex') {
     const meta = records.find(r => r.type === 'session_meta')?.payload;
-    if (meta?.source !== 'cli' || meta?.originator !== 'codex-tui' || meta.parent_thread_id) return false;
+    if (!['cli', 'vscode'].includes(meta?.source) || meta.parent_thread_id
+      || (meta.thread_source && meta.thread_source !== 'user')) return false;
+    // Shared-daemon CLI sessions inherit vscode/originator labels; thread_source belongs to this thread.
+    if (meta.thread_source === 'user') return true;
+    if (meta.source !== 'cli') return false;
   }
   if (kind === 'claude' && /[\\/]subagents[\\/]|[\\/]agent-[^\\/]+\.jsonl$/i.test(input.transcript_path)) return false;
   return Boolean(await interactive());
@@ -419,7 +424,7 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
         }
         const meta = client === 'codex' ? read.records.find(r => r.type === 'session_meta')?.payload : read.records.find(r => r.sessionId);
         endpoint.meta = meta ? (client === 'claude' ? { sessionId: meta.sessionId, cwd: meta.cwd, version: meta.version }
-          : { id: meta.id, cwd: meta.cwd, source: meta.source, originator: meta.originator, cli_version: meta.cli_version, parent_thread_id: meta.parent_thread_id, session_sync: meta.session_sync }) : (read.reset ? null : endpoint.meta);
+          : { id: meta.id, cwd: meta.cwd, source: meta.source, thread_source: meta.thread_source, originator: meta.originator, cli_version: meta.cli_version, parent_thread_id: meta.parent_thread_id, session_sync: meta.session_sync }) : (read.reset ? null : endpoint.meta);
         if (endpoint.meta && (endpoint.meta.id ?? endpoint.meta.sessionId) !== endpoint.id) throw Error('Transcript/session ID mismatch');
         if (endpoint.meta?.cwd && !await samePath(endpoint.meta.cwd, config.cwd)) throw Error('Transcript cwd mismatch');
         return read;
@@ -434,22 +439,25 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
           : options.interactive ? `test-parent:${process.ppid}` : await processCache.identity(kind);
       }
       const decision = decisions.state.entries[decisionKey];
-      if (!pair && cliIdentity && decision?.cliIdentity === cliIdentity && same(decision.file, input.transcript_path)) return null;
+      if (!pair && cliIdentity && decision?.eligibilityVersion === ELIGIBILITY_VERSION && decision.cliIdentity === cliIdentity && same(decision.file, input.transcript_path)) return null;
       reads[kind] = await scan(kind, sourceEndpoint);
       const source = reads[kind]?.records || [];
       const eligibilityRecords = kind === 'codex' ? [{ type: 'session_meta', payload: { ...sourceEndpoint.meta,
         ...(sourceEndpoint.mirror && sourceEndpoint.managed === 'app-server' && (!sourceEndpoint.createdBy || sourceEndpoint.createdBy === 'agent-kit-session-sync')
-          ? { source: 'cli', originator: 'codex-tui' } : {}) } }] : source;
-      if (!pair && (source.some(r => r.type === 'session-sync-mirror') || sourceEndpoint.meta?.session_sync?.mirror || sourceEndpoint.meta?.originator === 'agent-kit-session-sync')) throw Error('Orphan mirror: refusing mirror of mirror');
-      if (sourceEndpoint.eligible === undefined || (input.hook_event_name === 'SessionStart' && (!cliIdentity || sourceEndpoint.cliIdentity !== cliIdentity))) {
+          ? { source: 'vscode', thread_source: 'user' } : {}) } }] : source;
+      if (!pair && (source.some(r => r.type === 'session-sync-mirror') || sourceEndpoint.meta?.session_sync?.mirror
+        || (sourceEndpoint.meta?.originator === 'agent-kit-session-sync' && sourceEndpoint.meta?.thread_source !== 'user'))) throw Error('Orphan mirror: refusing mirror of mirror');
+      if (sourceEndpoint.eligible === undefined || sourceEndpoint.eligibilityVersion !== ELIGIBILITY_VERSION
+        || (input.hook_event_name === 'SessionStart' && (!cliIdentity || sourceEndpoint.cliIdentity !== cliIdentity))) {
         sourceEndpoint.eligible = await eligible(kind, input, eligibilityRecords, env, options.interactive);
         sourceEndpoint.cliIdentity = cliIdentity;
+        sourceEndpoint.eligibilityVersion = ELIGIBILITY_VERSION;
       }
       sourceEndpoint.eligible = await eligible(kind, input, eligibilityRecords, env, async () => sourceEndpoint.eligible);
       if (!sourceEndpoint.eligible) {
         if (pair && JSON.stringify(pair) !== beforePair) await write(path.join(config.stateDir, `${pair.id}.json`), JSON.stringify(pair));
         else if (!pair) {
-          processCache.remember(decisions.state, decisionKey, { file: input.transcript_path, cliIdentity });
+          processCache.remember(decisions.state, decisionKey, { file: input.transcript_path, cliIdentity, eligibilityVersion: ELIGIBILITY_VERSION });
           await write(decisions.file, JSON.stringify(decisions.state));
         }
         return null;

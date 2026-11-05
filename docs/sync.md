@@ -10,6 +10,8 @@ Sync and the broker use `codex app-server proxy`. Originator is process-global i
 
 Only `SessionStart`, `UserPromptSubmit` and `Stop` are used: the first two deliver pending context, Stop captures completed work. There is no per-tool process scan. CLI eligibility is reused while its process identity is unchanged; the initial Windows CIM / Unix ps check can be slower. Broker agents (`SESSION_SYNC_BROKER`), `SESSION_SYNC_EXCLUDE`, noninteractive exec/print sessions and subagents/sidechains are excluded. Codex requires a CLI build supporting these experimental hooks and `additionalContext`.
 
+Shared-daemon Codex CLI sessions can have `source=vscode` and an inherited `originator`; an explicit per-thread `thread_source=user` identifies user sessions without probing the daemon's process ancestry. New broker threads use `threadSource=agent-kit-broker` and remain excluded. Unmarked legacy CLI sessions still require the interactive process check.
+
 ## Context budget and delivery
 
 Seeds and backlog replacements use the latest compact summary plus the bounded recent context; without compaction, omitted earlier history is labeled. The default budget is about 50k tokens (UTF-8 bytes / 4), configurable with `SESSION_SYNC_CONTEXT_TOKENS`; compaction or an oversized pending backlog replaces that backlog with current context.

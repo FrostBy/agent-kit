@@ -159,3 +159,78 @@ test('Kimi owner must be live in this web server; cold sessions are never adopte
     owner.close();
   }
 });
+
+
+test('OpenCode ACP starts or resumes, sets model and handles conversation, permissions and cancellation', async () => {
+  for (const sessionId of [undefined, 'saved-session']) {
+    const proc = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), killed: false, kill() { this.killed = true; } });
+    const writes = [], requests = [], sessions = [], updates = [];
+    const send = msg => proc.stdout.write(JSON.stringify(msg) + '\n');
+    proc.stdin.on('data', data => {
+      const msg = JSON.parse(data); writes.push(msg);
+      if (msg.id && msg.method !== 'session/prompt') queueMicrotask(() => send({ id: msg.id,
+        result: msg.method === 'initialize' ? { agentCapabilities: { loadSession: true } } : { sessionId: 'saved-session' } }));
+    });
+    const client = connectInteractive({ agent: 'opencode', cwd: '/project', sessionId, model: 'provider/model',
+      env: { AGENT_BROKER_OPENCODE: 'custom-opencode' },
+      spawn(exe, args) { assert.equal(exe, 'custom-opencode'); assert.deepEqual(args, ['acp']); return proc; },
+      onSession: id => sessions.push(id), onRequest: msg => requests.push(msg), onUpdate: msg => updates.push(msg) });
+    await client.ready;
+    assert.deepEqual(writes.map(m => m.method), ['initialize', sessionId ? 'session/load' : 'session/new', 'session/set_config_option']);
+    assert.deepEqual(writes[2].params, { sessionId: 'saved-session', configId: 'model', value: 'provider/model' });
+    assert.deepEqual(sessions, ['saved-session']);
+    assert(!writes.some(m => m.method === 'session/prompt'));
+    const done = client.prompt('hello'); await new Promise(r => setImmediate(r));
+    await assert.rejects(client.prompt('second'), /steer=false/);
+    send({ id: 'permission', method: 'session/request_permission', params: { options: [{ kind: 'reject_once', optionId: 'no' }] } });
+    const entry = interactiveRequest('opencode', requests[0]);
+    client.respond('permission', interactiveResult('opencode', entry, {}, 'deny'));
+    assert.equal(writes.at(-1).result.outcome.optionId, 'no');
+    send({ method: 'session/update', params: { sessionId: 'saved-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'answer' } } } });
+    assert.equal(updates.length, 1);
+    const prompt = writes.find(m => m.method === 'session/prompt');
+    await client.interrupt(); assert.equal(writes.at(-1).method, 'session/cancel');
+    send({ id: prompt.id, result: { stopReason: 'cancelled' } });
+    assert.deepEqual(await done, { text: 'answer', status: 'interrupted' });
+    await client.close();
+    assert(proc.killed); assert(!writes.some(m => m.method === 'session/close'));
+  }
+});
+
+test('OpenCode ACP reports unsupported session loading and disconnects pending prompts', async () => {
+  for (const canLoad of [false, true]) {
+    const proc = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill() {} });
+    const disconnects = [];
+    proc.stdin.on('data', data => {
+      const msg = JSON.parse(data);
+      if (msg.id && msg.method !== 'session/prompt') queueMicrotask(() => proc.stdout.write(JSON.stringify({ id: msg.id,
+        result: msg.method === 'initialize' ? { agentCapabilities: { loadSession: canLoad } } : { sessionId: 'saved-session' } }) + '\n'));
+    });
+    const client = connectInteractive({ agent: 'opencode', cwd: '/project', sessionId: 'saved-session', spawn: () => proc, onDisconnect: reason => disconnects.push(reason) });
+    if (!canLoad) await assert.rejects(client.ready, /opencode ACP cannot load sessions/);
+    else {
+      await client.ready;
+      const done = client.prompt('hello'); await new Promise(r => setImmediate(r));
+      proc.emit('exit', 1);
+      await assert.rejects(done, /opencode exited/);
+      assert.deepEqual(disconnects, ['opencode exited (1)']);
+    }
+    await client.close();
+  }
+});
+
+
+test('OpenCode closes its session only when initialize advertises close', async () => {
+  for (const close of [false, true]) {
+    const proc = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill() {} });
+    const methods = [];
+    proc.stdin.on('data', data => {
+      const msg = JSON.parse(data); methods.push(msg.method);
+      queueMicrotask(() => proc.stdout.write(JSON.stringify({ id: msg.id, result: msg.method === 'initialize'
+        ? { agentCapabilities: { sessionCapabilities: close ? { close: {} } : {} } } : { sessionId: 'saved-session' } }) + '\n'));
+    });
+    const client = connectInteractive({ agent: 'opencode', cwd: '/project', spawn: () => proc });
+    await client.ready; await client.close();
+    assert.equal(methods.includes('session/close'), close);
+  }
+});

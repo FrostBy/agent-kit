@@ -12,6 +12,7 @@
 const { spawn } = require('node:child_process');
 const { connectProxy, sandboxError } = require('../../src/agents/codex-client');
 const { plain } = require('../../src/agents/codex-path');
+const { resolve: resolvePolicy } = require('../../src/agents/model-policy');
 const { syncThreads } = require('../../src/agents/sync-protection');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -49,26 +50,39 @@ for (let i = 0; i < argv.length; i++) {
   else if (k === '--claude-config-dir') opt.claudeConfigDirs.push(v());
   else throw new Error(`unknown arg ${k}`);
 }
-if (!opt.agent || !opt.name || !opt.state || (!opt.prompt && !opt.resume)) {
-  console.error('usage: agent-broker --agent codex|kimi|claude --name X --state DIR --prompt FILE [--cwd DIR] [--model M] [--effort E] [--mode default|plan (codex only)] [--sandbox read-only|workspace-write] [--network] [--search] [--image PNG]... [--idle-min 15] [--kimi-print] [--claude-config-dir DIR]...');
+if (!opt.name || !opt.state || (!opt.prompt && !opt.resume)) {
+  console.error('usage: agent-broker --agent codex|kimi|claude|opencode --name X --state DIR --prompt FILE [--cwd DIR] [--model M] [--effort E] [--mode default|plan (codex only)] [--sandbox read-only|workspace-write] [--network] [--search] [--image PNG]... [--idle-min 15] [--kimi-print] [--claude-config-dir DIR]...');
   process.exit(2);
 }
 if (!/^[\w-]+$/.test(opt.name)) throw Error('Invalid agent name');
-if (!['codex', 'kimi', 'claude'].includes(opt.agent)) throw Error('Invalid agent');
-if (opt.mode !== undefined && (opt.agent !== 'codex' || !['default', 'plan'].includes(opt.mode))) throw Error('Invalid --mode: expected default|plan for --agent codex');
-if (opt.agent === 'codex') opt.mode ??= 'default';
 opt.approvalPolicy ??= 'never';
 if (!['never', 'on-request', 'on-failure', 'untrusted'].includes(opt.approvalPolicy)) throw Error('Invalid --approval-policy');
+const requestedCwd = opt.cwd;
 opt.cwd = path.resolve(opt.cwd ?? process.cwd());
 opt.idleMin ??= 15;
 if (!Number.isFinite(opt.idleMin) || opt.idleMin <= 0) throw Error('Invalid --idle-min');
 const base = path.join(path.resolve(opt.state), opt.name);
 const inbox = `${base}.inbox`;
-fs.mkdirSync(inbox, { recursive: true });
 let previous;
 {
   try { previous = JSON.parse(fs.readFileSync(`${base}.state.json`, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
+if (opt.resume && previous) {
+  const savedConnector = previous.launch?.connector || previous.connector || previous.agent;
+  if (opt.agent && opt.agent !== savedConnector) throw Error('Cannot change connector on resume');
+  if (previous.launch?.cwd) {
+    if (requestedCwd && path.resolve(requestedCwd) !== path.resolve(previous.launch.cwd)) throw Error('Cannot change cwd on resume');
+    opt.cwd = path.resolve(previous.launch.cwd);
+  }
+  if (opt.model !== undefined && opt.model !== previous.launch?.model) throw Error('Cannot change model on resume');
+  opt.agent = savedConnector; opt.model = previous.launch?.model;
+}
+const policy = resolvePolicy({ env: process.env, cwd: opt.cwd, connector: opt.agent, model: opt.model });
+opt.agent = policy.agent; opt.connector = policy.connector;
+if (policy.executable) process.env[`AGENT_BROKER_${opt.agent.toUpperCase()}`] ||= policy.executable;
+if (opt.mode !== undefined && (opt.agent !== 'codex' || !['default', 'plan'].includes(opt.mode))) throw Error('Invalid --mode: expected default|plan for --agent codex');
+if (opt.agent === 'codex') opt.mode ??= 'default';
+fs.mkdirSync(inbox, { recursive: true });
 if (opt.resume && (previous?.agent !== opt.agent || !(opt.agent === 'codex' ? previous?.threadId : previous?.sessionId))) throw Error('Cannot resume: no saved threadId/sessionId');
 if (previous?.agent === 'codex' && previous.threadId && !/^[\w-]+$/.test(previous.threadId)) throw Error('Invalid saved thread ID');
 if (previous?.pid && previous.pid !== process.pid && !['done', 'error'].includes(previous.status)) {
@@ -76,7 +90,8 @@ if (previous?.pid && previous.pid !== process.pid && !['done', 'error'].includes
   if (live) throw Error('Broker state is owned by a live process');
 }
 const state = { ...(previous?.agent === opt.agent ? previous : {}), agent: opt.agent, status: 'starting', turns: previous?.agent === opt.agent ? previous.turns || 0 : 0, pid: process.pid };
-state.launch = { agent: opt.agent, cwd: opt.cwd, model: opt.model, effort: opt.effort, mode: opt.mode, sandbox: opt.sandbox,
+state.connector = opt.connector;
+state.launch = { agent: opt.agent, connector: opt.connector, cwd: opt.cwd, model: opt.model, effort: opt.effort, mode: opt.mode, sandbox: opt.sandbox,
   approvalPolicy: opt.approvalPolicy, network: !!opt.network, search: !!opt.search, idleMin: opt.idleMin, kimiPrint: !!opt.kimiPrint, claudeConfigDirs: opt.claudeConfigDirs };
 if (opt.resume) state.turnId = null;
 const relative = path.relative(path.join(require('node:os').tmpdir(), 'claude'), path.resolve(opt.state)).split(path.sep);
@@ -161,7 +176,7 @@ if (sandboxFailure) {
   log(sandboxFailure.message); console.error(sandboxFailure.message); void done('error', 1);
 } else if (opt.agent === 'codex') runCodex();
 else if (opt.agent === 'kimi' && opt.kimiPrint) runKimi();
-else if (['kimi', 'claude'].includes(opt.agent)) runInteractive();
+else if (['kimi', 'claude', 'opencode'].includes(opt.agent)) runInteractive();
 else throw new Error(`unknown agent ${opt.agent}`);
 if (state.owner) setInterval(() => {
   if (state.ownerPid && !alive(state.ownerPid)) void done('done', 0, 'owner');
@@ -348,6 +363,7 @@ function runCodex() {
   }
 
   const startTurn = async (text, images = []) => {
+    resolvePolicy({ env: process.env, cwd: opt.cwd, connector: opt.connector, model: opt.model });
     const params = { threadId, input: input(text, images), ...(opt.effort ? { effort: opt.effort } : {}) };
     if (opt.mode === 'plan') params.collaborationMode = { mode: 'plan', settings: {
       model: opt.model ?? state.model, reasoning_effort: opt.effort ?? state.effort ?? null, developer_instructions: null,
@@ -364,6 +380,7 @@ function runCodex() {
       state.archived = false; save();
       await request('thread/resume', { threadId, ...threadParams() });
       attempt = 0;
+      resolvePolicy({ env: process.env, cwd: opt.cwd, connector: opt.connector, model: opt.model });
       res = await request('turn/start', params);
     }
     turnId = res.turn?.id ?? turnId;
@@ -382,6 +399,7 @@ function runCodex() {
       return;
     }
     if (turnId) {
+      resolvePolicy({ env: process.env, cwd: opt.cwd, connector: opt.connector, model: opt.model });
       log(`steer ${text.slice(0, 120)}`);
       await request('turn/steer', { threadId, expectedTurnId: turnId, input: input(text) }).catch((e) => {
         if (isDrain(e)) throw e;
@@ -406,7 +424,7 @@ function runCodex() {
           log(`message failed ${JSON.stringify(e).slice(0, 300)}`);
           emit('error', { source: 'message', ...e }, { turnId, summary: e.message || 'Message rejected' });
           state.lastTurnStatus = 'failed';
-          finishTurn(`[broker] сообщение не принято сервером: ${JSON.stringify(e).slice(0, 300)}`);
+          finishTurn(`[broker] сообщение не принято сервером: ${e.message || JSON.stringify(e).slice(0, 300)}`);
           state.status = turnId ? 'running' : 'idle';
           save();
         }
@@ -452,7 +470,7 @@ function runCodex() {
         ...(opt.mode === 'plan' ? { capabilities: { experimentalApi: true } } : {}) });
       notify('initialized', {});
       if (!threadId) {
-        const res = await request('thread/start', threadParams());
+        const res = await request('thread/start', { ...threadParams(), threadSource: 'agent-kit-broker' });
         threadId = res.thread?.id;
         state.threadId = threadId; state.archived = false;
         state.model = res.model;
@@ -515,7 +533,6 @@ function runCodex() {
 function runKimi() {
   // Kimi в режиме -p не принимает сообщения посреди хода: ящик читается после хода и уходит
   // следующим сообщением в ту же сессию (kimi -S <id>).
-  const model = opt.model ?? 'kimi-code/kimi-for-coding';
   let session = state.sessionId || null;
   let active;
   let closing = false;
@@ -536,9 +553,14 @@ function runKimi() {
     }
   }, 1000);
   const turn = (text) => new Promise((resolve) => {
+    try { resolvePolicy({ env: process.env, cwd: opt.cwd, connector: opt.connector, model: opt.model }); }
+    catch (error) {
+      state.lastTurnStatus = 'failed'; emit('error', { source: 'agent', message: error.message }, { summary: error.message });
+      finishTurn(`[broker] ${error.message}`); state.status = 'idle'; lastActivity = Date.now(); save(); resolve(); return;
+    }
     state.status = 'running';
     save();
-    const args = ['-m', model, ...(session ? ['-S', session] : []), '-p', text];
+    const args = [...(opt.model ? ['-m', opt.model] : []), ...(session ? ['-S', session] : []), '-p', text];
     const p = spawn(process.env.AGENT_BROKER_KIMI || 'kimi', args, { windowsHide: true, cwd: opt.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     active = p;
     let out = '';
@@ -598,7 +620,9 @@ function runInteractive() {
     if (!booted || running || closing || !queue.length) return;
     running = true; state.status = 'running'; state.turnId = randomUUID(); save();
     try {
-      const result = await client.prompt(queue.shift());
+      const text = queue.shift();
+      resolvePolicy({ env: process.env, cwd: opt.cwd, connector: opt.connector, model: opt.model });
+      const result = await client.prompt(text);
       if (closing) return;
       invalidate('turn completed'); state.lastTurnStatus = result.status; finishTurn(result.text);
     } catch (error) {
@@ -717,11 +741,15 @@ async function runSendWait(mode, args) {
   const initialEvents = new Set(mesh.readEvents(`${basePath}.events.jsonl`).map(e => e.id));
   const sentText = mode === 'send' ? (sub.message ? fs.readFileSync(sub.message, 'utf8') : sub.text) : null;
   const exiting = sentText?.trim() === '/exit';
+  if (mode === 'send' && !['/exit', '/interrupt'].includes(sentText.trim())) {
+    resolvePolicy({ env: process.env, cwd: initial.launch?.cwd, connector: initial.launch?.connector || initial.connector || initial.agent, model: initial.launch?.model ?? initial.model });
+  }
   if (!alive(initial.pid)) {
     if (mode !== 'send') throw Error(`broker.js ${mode}: процесс брокера ${initial.pid} не жив (status ${initial.status})`);
-    if (!(initial.agent === 'codex' ? initial.threadId : ['kimi', 'claude'].includes(initial.agent) && initial.sessionId)) throw Error('broker.js send: процесс не жив; нет сохранённого threadId/sessionId для продолжения');
+    if (!(initial.agent === 'codex' ? initial.threadId : ['kimi', 'claude', 'opencode'].includes(initial.agent) && initial.sessionId)) throw Error('broker.js send: процесс не жив; нет сохранённого threadId/sessionId для продолжения');
     if (!initial.launch) throw Error('broker.js send: нет сохранённых параметров запуска; перезапустите брокер явно');
-    const launch = [__filename, '--resume', '--agent', initial.agent, '--name', sub.name, '--state', dir];
+    const connector = initial.launch.connector || initial.connector || initial.agent;
+    const launch = [__filename, '--resume', '--agent', connector, '--name', sub.name, '--state', dir];
     for (const [key, flag] of Object.entries({ cwd: '--cwd', model: '--model', effort: '--effort', mode: '--mode', sandbox: '--sandbox', approvalPolicy: '--approval-policy', idleMin: '--idle-min' })) {
       if (initial.launch[key] !== undefined) launch.push(flag, String(initial.launch[key]));
     }

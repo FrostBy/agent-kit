@@ -8,17 +8,17 @@ const { questionResult } = require('./mesh');
 // Both CLIs keep stdin open between turns. Only protocol ACKs have a deadline.
 function connectInteractive({ agent, env = process.env, cwd, sessionId, model, spawn = defaultSpawn,
   onRequest, onUpdate = () => {}, onSession = () => {}, onDisconnect = () => {}, log = () => {}, timeout = 30000 }) {
-  const kimi = agent === 'kimi';
-  const args = kimi ? [...(model ? ['-m', model] : []), 'acp']
+  const kimi = agent === 'kimi', acp = kimi || agent === 'opencode';
+  const args = acp ? [...(kimi && model ? ['-m', model] : []), 'acp']
     : ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
       '--permission-prompt-tool', 'stdio', ...(sessionId ? ['--resume', sessionId] : []), ...(model ? ['--model', model] : [])];
   const childEnv = { ...env, SESSION_SYNC_BROKER: '1' };
   delete childEnv.CODEX_THREAD_ID;
   delete childEnv.CLAUDECODE;
-  const proc = spawn(env[kimi ? 'AGENT_BROKER_KIMI' : 'AGENT_BROKER_CLAUDE'] || agent, args,
+  const proc = spawn(env[acp ? (kimi ? 'AGENT_BROKER_KIMI' : 'AGENT_BROKER_OPENCODE') : 'AGENT_BROKER_CLAUDE'] || agent, args,
     { env: childEnv, cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const pending = new Map();
-  let live = true, closed = false, turn, text = '', currentSession = sessionId;
+  let live = true, closed = false, canClose = false, turn, text = '', currentSession = sessionId;
   const write = msg => { if (!live) throw Error('Disconnected agent'); proc.stdin.write(JSON.stringify(msg) + '\n'); };
   function lost(reason) {
     if (!live) return;
@@ -36,12 +36,12 @@ function connectInteractive({ agent, env = process.env, cwd, sessionId, model, s
       const timer = limit ? setTimeout(() => { pending.delete(id); reject(Error(`Agent request timeout: ${method}`)); }, limit) : null;
       const settle = fn => value => { clearTimeout(timer); fn(value); };
       pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
-      try { write(kimi ? { jsonrpc: '2.0', id, method, params } : { type: 'control_request', request_id: id, request: { subtype: method, ...params } }); }
+      try { write(acp ? { jsonrpc: '2.0', id, method, params } : { type: 'control_request', request_id: id, request: { subtype: method, ...params } }); }
       catch (error) { pending.delete(id); clearTimeout(timer); reject(error); }
     });
   }
   function respond(id, result, error) {
-    write(kimi ? { jsonrpc: '2.0', id, ...(error ? { error } : { result }) }
+    write(acp ? { jsonrpc: '2.0', id, ...(error ? { error } : { result }) }
       : { type: 'control_response', response: { subtype: error ? 'error' : 'success', request_id: id,
         ...(error ? { error: error.message } : { response: result }) } });
   }
@@ -50,24 +50,24 @@ function connectInteractive({ agent, env = process.env, cwd, sessionId, model, s
     let msg;
     try { msg = JSON.parse(line); } catch { lost('Invalid agent JSON'); return; }
     try {
-      const id = kimi ? msg.id : msg.response?.request_id;
-      if ((kimi ? !msg.method : msg.type === 'control_response') && pending.has(id)) {
+      const id = acp ? msg.id : msg.response?.request_id;
+      if ((acp ? !msg.method : msg.type === 'control_response') && pending.has(id)) {
         const p = pending.get(id); pending.delete(id);
-        const error = kimi ? msg.error : msg.response.subtype === 'error' && { message: msg.response.error };
+        const error = acp ? msg.error : msg.response.subtype === 'error' && { message: msg.response.error };
         if (error) p.reject(Object.assign(Error(error.message), error));
-        else p.resolve(kimi ? msg.result : msg.response.response);
-      } else if (kimi && msg.id !== undefined && msg.method) {
+        else p.resolve(acp ? msg.result : msg.response.response);
+      } else if (acp && msg.id !== undefined && msg.method) {
         onRequest({ id: msg.id, method: msg.method, params: msg.params || {} });
-      } else if (!kimi && msg.type === 'control_request') {
+      } else if (!acp && msg.type === 'control_request') {
         onRequest({ id: msg.request_id, method: msg.request?.subtype, params: msg.request || {} });
-      } else if (!kimi && msg.type === 'control_cancel_request') {
+      } else if (!acp && msg.type === 'control_cancel_request') {
         onUpdate({ method: 'request.cancelled', params: { requestId: msg.request_id } });
-      } else if (kimi && msg.method === 'session/update') {
+      } else if (acp && msg.method === 'session/update') {
         if (msg.params?.sessionId !== currentSession || !turn) return;
         const update = msg.params.update;
         if (update?.sessionUpdate === 'agent_message_chunk' && update.content?.type === 'text') text += update.content.text;
         onUpdate(msg);
-      } else if (!kimi) {
+      } else if (!acp) {
         if (msg.session_id && msg.session_id !== currentSession) { currentSession = msg.session_id; onSession(currentSession); }
         if (msg.type === 'assistant' && !msg.parent_tool_use_id) text += (msg.message?.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
         if (msg.type === 'result' && turn) {
@@ -83,13 +83,15 @@ function connectInteractive({ agent, env = process.env, cwd, sessionId, model, s
   proc.on('error', error => lost(error.message));
   proc.on('exit', code => lost(`${agent} exited (${code})`));
   const ready = (async () => {
-    if (kimi) {
+    if (acp) {
       const init = await request('initialize', { protocolVersion: 1, clientInfo: { name: 'agent-kit', version: '0.5.5' }, clientCapabilities: { elicitation: { form: {} } } });
-      if (sessionId && !init.agentCapabilities?.loadSession) throw Error('Kimi ACP cannot load sessions; use --kimi-print only for legacy compatibility');
+      canClose = kimi || !!init.agentCapabilities?.sessionCapabilities?.close;
+      if (sessionId && !init.agentCapabilities?.loadSession) throw Error(`${agent} ACP cannot load sessions${kimi ? '; use --kimi-print only for legacy compatibility' : ''}`);
       const session = await request(sessionId ? 'session/load' : 'session/new', { ...(sessionId ? { sessionId } : {}), cwd, mcpServers: [] });
       currentSession = session.sessionId || sessionId;
-      if (!currentSession) throw Error('Kimi ACP returned no sessionId');
+      if (!currentSession) throw Error(`${agent} ACP returned no sessionId`);
       onSession(currentSession);
+      if (!kimi && model) await request('session/set_config_option', { sessionId: currentSession, configId: 'model', value: model });
     } else await request('initialize', { hooks: {}, sdkMcpServers: [] });
   })();
   return {
@@ -98,7 +100,7 @@ function connectInteractive({ agent, env = process.env, cwd, sessionId, model, s
       await ready;
       if (turn) throw Error('Agent turn already running (steer=false)');
       text = '';
-      if (kimi) {
+      if (acp) {
         // ACP completes a turn with the prompt RPC result, after all session/update chunks.
         turn = { reject() {} };
         try {
@@ -113,12 +115,12 @@ function connectInteractive({ agent, env = process.env, cwd, sessionId, model, s
       });
     },
     interrupt() {
-      if (kimi) { write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: currentSession } }); return Promise.resolve(); }
+      if (acp) { write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: currentSession } }); return Promise.resolve(); }
       return request('interrupt', {});
     },
     async close() {
       closed = true;
-      try { if (kimi && live && currentSession) await request('session/close', { sessionId: currentSession }, 5000); }
+      try { if (canClose && live && currentSession) await request('session/close', { sessionId: currentSession }, 5000); }
       finally { lost('Agent closed'); lines.close(); }
     }
   };
@@ -144,7 +146,7 @@ function interactiveRequest(agent, msg) {
   if (msg.method === 'session/request_permission') {
     if (p.toolCall?.title === 'AskUserQuestion') return { type: 'question', params: { ...p,
       questions: [{ id: 'question', question: (p.toolCall.content || []).map(c => c.content?.text || '').join('\n'), options: (p.options || []).filter(o => o.kind === 'allow_once').map(o => ({ label: o.name })) }] }, summary: 'AskUserQuestion' };
-    return { type: 'approval', params: p, summary: p.toolCall?.title || 'Kimi tool permission' };
+    return { type: 'approval', params: p, summary: p.toolCall?.title || `${agent} tool permission` };
   }
   return null;
 }

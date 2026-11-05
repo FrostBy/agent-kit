@@ -22,7 +22,7 @@ test('send/wait ACK only the returned completion; /exit ACKs its own exit even w
       fs.readFileSync = function(file, ...args) { const result = read.call(this, file, ...args);
         if (!sent && String(file).endsWith('worker.state.json')) { sent = true; process.send('ready'); } return result; };`);
     const child = spawn(process.execPath, ['--require', preload, path.resolve(__dirname, '../scripts/agents/broker.js'), mode === 'wait' ? 'wait' : 'send', '--name', 'worker', '--state', root,
-      ...(mode === 'wait' ? [] : ['--text', mode === 'exit' ? '/exit' : 'hello']), '--timeout-min', '0.03'], { env: { ...process.env, BROKER_POLL_MS: '10' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+      ...(mode === 'wait' ? [] : ['--text', mode === 'exit' ? '/exit' : 'hello']), '--timeout-min', '0.03'], { env: { ...process.env, HOME: root, USERPROFILE: root, BROKER_POLL_MS: '10' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
     t.after(() => child.kill());
     let stderr = '', out = ''; child.stderr.on('data', b => { stderr += b; }); child.stdout.on('data', b => { out += b; });
     const exited = new Promise(r => child.on('exit', r));

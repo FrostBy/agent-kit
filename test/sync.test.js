@@ -39,6 +39,7 @@ async function fixture(t) {
       await fs.unlink(thread.path); threads.delete(thread.id); return {};
     }
     if (method === 'thread/inject_items') {
+      for (const item of params.items) assert(item.id.length <= 64, 'Responses input item IDs must fit the 64-character limit');
       if (config.injectDelay) await new Promise(resolve => setTimeout(resolve, config.injectDelay));
       await fs.appendFile(thread.path, jsonl(params.items.map(payload => ({ type: 'response_item', payload }))));
       if (config.dropInjectionReply) { config.dropInjectionReply = false; throw Error('reply lost after injection'); }
@@ -154,6 +155,38 @@ test('eligibility caches process checks, rechecks resumed modes, and excludes br
   assert.equal(await eligible('claude', { ...f.input(), transcript_path: '/subagents/agent-123.jsonl' }, [], {}, options.interactive), false);
   assert.equal(extract('claude', [c(f.id, 'sidechain', { isSidechain: true })], f.id).length, 0);
   assert.throws(() => extract('codex', [{ type: 'event_msg', payload: { type: 'thread_rolled_back' } }], 'id'), /rollback/);
+});
+
+test('shared-daemon user threads sync despite inherited labels and an obsolete denial cache', async t => {
+  const f = await fixture(t), id = randomUUID(), file = path.join(f.config.codexSessionsDir, `${id}.jsonl`);
+  const meta = { id, cwd: f.config.cwd, source: 'vscode', thread_source: 'user', originator: 'claude-agent-broker' };
+  const noProbe = () => { throw Error('A per-thread user marker must not probe the daemon ancestry'); };
+  for (const originator of ['claude-agent-broker', 'agent-kit-session-sync', 'codex-tui']) {
+    assert.equal(await eligible('codex', f.input(), [{ type: 'session_meta', payload: { ...meta, originator } }], {}, noProbe), true);
+  }
+  for (const rejected of [
+    { ...meta, thread_source: undefined }, { ...meta, thread_source: 'agent-kit-broker' },
+    { ...meta, thread_source: 'guardian_review' }, { ...meta, source: 'exec' },
+    { ...meta, source: { subagent: {} } }, { ...meta, parent_thread_id: 'parent' }
+  ]) assert.equal(await eligible('codex', f.input(), [{ type: 'session_meta', payload: rejected }], {}, noProbe), false);
+  assert.equal(await eligible('codex', f.input(), [{ type: 'session_meta', payload: meta }], { SESSION_SYNC_BROKER: '1' }, noProbe), false);
+  await fs.mkdir(f.config.codexSessionsDir, { recursive: true });
+  await fs.writeFile(file, jsonl([{ type: 'session_meta', payload: meta }, x('SHARED-DAEMON-HANDOFF')]));
+  await fs.mkdir(f.config.stateDir, { recursive: true });
+  const key = `codex:${require('node:crypto').createHash('sha256').update(id).digest('hex')}`;
+  await fs.writeFile(path.join(f.config.stateDir, 'decisions.json'), JSON.stringify({ cleanedAt: Date.now(), entries: {
+    [key]: { file, cliIdentity: 'same-daemon', at: Date.now() }
+  } }));
+  const input = f.input('codex', { id, file }), options = { env: {}, cliIdentity: 'same-daemon', interactive: noProbe };
+  await hook('codex', input, f.config, options);
+  const p = await f.pair();
+  assert.equal(p.codex.meta.thread_source, 'user');
+  assert.equal(p.claude.seeded, true);
+  assert.match(await fs.readFile(p.claude.file, 'utf8'), /SHARED-DAEMON-HANDOFF/);
+  await f.append(file, [x('SHARED-DAEMON-FOLLOWUP')]);
+  await hook('codex', input, f.config, options);
+  const output = await hook('claude', f.input('claude', p.claude, 'UserPromptSubmit'), f.config, opts);
+  assert.match(output.hookSpecificOutput.additionalContext, /SHARED-DAEMON-FOLLOWUP/);
 });
 
 test('confined writes, orphan mirrors, mismatched IDs, archive recovery and lock contention fail closed', async t => {

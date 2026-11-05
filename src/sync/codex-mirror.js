@@ -34,7 +34,7 @@ async function createCodexMirror(endpoint, title, entries, config, { checkpoint,
         const resumed = await request('thread/resume', { threadId: endpoint.id });
         if (plain(resumed.thread?.path)) { endpoint.file = plain(resumed.thread.path); await checkpoint(); }
       }
-      const content = endpoint.seedItems || entries.map(entry => ({ type: 'message', id: `msg_sync_${hash(entry.key)}`,
+      const content = endpoint.seedItems || entries.map(entry => ({ type: 'message', id: `msg_sync_${hash(entry.key).slice(0, 55)}`,
         role: entry.role, ...(entry.role === 'assistant' ? { phase: 'final_answer' } : {}),
         content: [{ type: entry.role === 'user' ? 'input_text' : 'output_text', text: `[session-sync:v2:${entry.key}]\n${entry.text}` }] }));
       if (!content.length) content.push({ type: 'message', id: 'msg_sync_empty', role: 'user', content: [{ type: 'input_text', text: `[session-sync:v2:seed]\n${title}` }] });
