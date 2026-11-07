@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('node:fs/promises');
+const { createReadStream } = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { createHash, randomUUID } = require('node:crypto');
@@ -87,11 +88,21 @@ async function readJson(file, fallback) {
   catch (e) { if (e.code === 'ENOENT') return fallback; throw e; }
 }
 
-async function rows(file) {
-  const bytes = await fs.readFile(file);
-  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  // A writer may still be flushing its last record; never consume a partial line.
-  return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
+async function* rows(file) {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let fragments = [];
+  for await (const chunk of createReadStream(file)) {
+    let start = 0, end;
+    while ((end = chunk.indexOf(10, start)) !== -1) {
+      fragments.push(chunk.subarray(start, end));
+      const line = decoder.decode(fragments.length === 1 ? fragments[0] : Buffer.concat(fragments));
+      fragments = [];
+      if (line) yield JSON.parse(line);
+      start = end + 1;
+    }
+    // A writer may still be flushing its last record; never consume a partial line.
+    if (start < chunk.length) fragments.push(chunk.subarray(start));
+  }
 }
 
 function textBlocks(content) {
@@ -485,7 +496,7 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
         const read = reads[client] || await scan(client, endpoint);
         if (!read) continue;
         if (read.reset) {
-          if (endpoint.cursor && pair.archiveSize) for (const event of await rows(journal)) known.add(event.key);
+          if (endpoint.cursor && pair.archiveSize) for await (const event of rows(journal)) known.add(event.key);
           endpoint.extraction = {}; endpoint.active = null;
         }
         if (!endpoint.mirror) names.observe(endpoint, client, read.records, read.reset);

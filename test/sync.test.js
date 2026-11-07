@@ -6,7 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { performance } = require('node:perf_hooks');
-const { configuration, hook, eligible, extract, incremental, withConfig, write, hookConfigs } = require('../src/sync');
+const { configuration, hook, eligible, extract, incremental, withConfig, write, hookConfigs, rows } = require('../src/sync');
 const { configure } = require('../src/sync/install');
 const { slug, activated, projectPaths } = require('../src/sync/activation');
 const opts = { env: {}, interactive: async () => true };
@@ -136,6 +136,39 @@ test('incremental byte reader: partial UTF-8, truncation, replacement and same-s
   await fs.writeFile(file, '{"text":"REPLACEMENT"}\n'); r = await incremental(file, r.cursor); assert.equal(r.reset, true);
   await fs.writeFile(file, '{bad}\n'); await assert.rejects(incremental(file), SyntaxError);
   await fs.writeFile(file, Buffer.from([0xff, 10])); await assert.rejects(incremental(file), /encoded data/);
+});
+
+test('journal reader streams complete records across UTF-8 boundaries and rejects corrupt data', async t => {
+  const { file } = await fixture(t);
+  const first = { text: 'x'.repeat(65526) + '\u043f\u0440\u0438\u0432\u0435\u0442' }, second = { key: 'next' };
+  await fs.writeFile(file, jsonl([first, second]) + '\n{"partial":');
+  const collect = async () => { const result = []; for await (const row of rows(file)) result.push(row); return result; };
+  assert.deepEqual(await collect(), [first, second]);
+  await fs.appendFile(file, 'true}\n');
+  assert.deepEqual(await collect(), [first, second, { partial: true }]);
+  await fs.writeFile(file, '{bad}\n');
+  await assert.rejects(collect(), SyntaxError);
+  await fs.writeFile(file, Buffer.from([0xff, 10]));
+  await assert.rejects(collect(), /encoded data/);
+  await fs.unlink(file);
+  await assert.rejects(collect(), { code: 'ENOENT' });
+});
+
+test('truncated transcript rebuilds from the journal without redelivering archived events', async t => {
+  const f = await fixture(t);
+  const records = Array.from({ length: 300 }, (_, i) => c(f.id, `turn ${i}`, { uuid: `event-${i}` }));
+  await fs.writeFile(f.file, jsonl(records));
+  await hook('claude', f.input(), f.config, opts);
+  const before = await f.pair();
+  assert.equal(before.known.length, 256);
+  const retained = [records[0], records[100], records[299]];
+  await fs.writeFile(f.file, jsonl(retained));
+  await hook('claude', f.input(), f.config, opts);
+  const after = await f.pair(), archive = await f.archive();
+  assert.equal(archive.length, 303);
+  assert.deepEqual(archive.slice(-3).map(event => event.key), [archive[0].key, archive[100].key, archive[299].key]);
+  assert.deepEqual(after.codex.pending, before.codex.pending);
+  assert.equal(after.claude.cursor.offset, Buffer.byteLength(jsonl(retained)));
 });
 
 test('eligibility caches process checks, rechecks resumed modes, and excludes brokers/sidechains/exec', async t => {
