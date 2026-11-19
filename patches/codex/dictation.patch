@@ -955,7 +955,7 @@ index f4fa6ce..9cbb65c 100644
              // Opening settings is not a request to leave the current reading anchor.
              // Inline commands still follow so their output (including usage errors) is visible.
 diff --git a/codex-rs/tui/src/chatwidget/realtime.rs b/codex-rs/tui/src/chatwidget/realtime.rs
-index cdffddc..f8f870f 100644
+index cdffddc..ebafad1 100644
 --- a/codex-rs/tui/src/chatwidget/realtime.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime.rs
 @@ -142,6 +142,11 @@ pub(super) struct RealtimeConversationUiState {
@@ -1058,17 +1058,7 @@ index cdffddc..f8f870f 100644
          self.invalidate_realtime_voice_input();
          if self.realtime_conversation.phase == RealtimeConversationPhase::Active {
              self.realtime_conversation.pending_typed_input = Some(text.to_string());
-@@ -1034,7 +1083,8 @@ impl ChatWidget {
-             return;
-         }
-         *may_speak = false;
--        if !can_retain_realtime_speech(turn_id, item)
-+        if self.realtime_conversation.speaker_muted
-+            || !can_retain_realtime_speech(turn_id, item)
-             || codex_utils_string::approx_token_count(&text) > MAX_SPEAKABLE_FINAL_TOKENS
-         {
-             self.remove_waiting_realtime_speech(turn_id, item_id);
-@@ -1315,6 +1365,32 @@ impl ChatWidget {
+@@ -1315,6 +1364,32 @@ impl ChatWidget {
      }
  
      pub(super) fn on_realtime_transcript_delta(&mut self, role: String, delta: String) {
@@ -1101,7 +1091,7 @@ index cdffddc..f8f870f 100644
          if self.realtime_conversation.phase == RealtimeConversationPhase::Inactive
              && !self.realtime_conversation.recover_late_transcripts
          {
-@@ -1458,6 +1534,40 @@ impl ChatWidget {
+@@ -1458,6 +1533,40 @@ impl ChatWidget {
      }
  
      pub(super) fn on_realtime_transcript_done(&mut self, role: String, mut text: String) {
@@ -1142,7 +1132,7 @@ index cdffddc..f8f870f 100644
          if matches!(
              self.realtime_conversation.phase,
              RealtimeConversationPhase::Inactive | RealtimeConversationPhase::Stopping
-@@ -1688,6 +1798,11 @@ impl ChatWidget {
+@@ -1688,6 +1797,11 @@ impl ChatWidget {
      }
  
      fn finish_realtime_partial_transcripts(&mut self) {
@@ -1154,7 +1144,7 @@ index cdffddc..f8f870f 100644
          if let Some((role, text)) = self.realtime_conversation.interleaved_transcript.take() {
              self.realtime_conversation.interleaved_transcript_cell = None;
              self.on_realtime_transcript_done(role, text);
-@@ -1785,6 +1900,8 @@ impl ChatWidget {
+@@ -1785,6 +1899,8 @@ impl ChatWidget {
          self.restore_all_undelivered_realtime_speech();
          self.finish_realtime_partial_transcripts();
          let muted = self.realtime_conversation.microphone_muted;
@@ -1163,7 +1153,7 @@ index cdffddc..f8f870f 100644
          let thread_id = self.realtime_conversation.thread_id;
          let retry_thread_id = if retry_after_stop || retry_after_early_close {
              thread_id.filter(|id| Some(*id) == self.thread_id())
-@@ -1811,6 +1928,8 @@ impl ChatWidget {
+@@ -1811,6 +1927,8 @@ impl ChatWidget {
              // The old backend is closed. A late peer result belongs to its attempt ID.
              self.realtime_conversation.startup_retry = StartupRetry::Used;
              self.realtime_conversation.microphone_muted = muted;
@@ -1173,7 +1163,7 @@ index cdffddc..f8f870f 100644
                  self.add_info_message(
                      "Voice connection closed during startup. Retrying once.".into(),
 diff --git a/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs b/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
-index e299500..de59734 100644
+index e299500..292ba61 100644
 --- a/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
 @@ -28,6 +28,9 @@ impl ChatWidget {
@@ -1186,7 +1176,7 @@ index e299500..de59734 100644
          if muted {
              self.realtime_conversation.microphone_history = VoiceAmplitudeHistory::default();
              for (microphone, _) in &mut self.realtime_conversation.audio_meter_history {
-@@ -59,7 +62,24 @@ impl ChatWidget {
+@@ -59,7 +62,23 @@ impl ChatWidget {
              }
      }
  
@@ -1197,7 +1187,6 @@ index e299500..de59734 100644
 +        self.realtime_conversation.speaker_muted = !self.realtime_conversation.speaker_muted;
 +        if self.realtime_conversation.speaker_muted {
 +            self.suppress_realtime_speaker();
-+            self.restore_all_undelivered_realtime_speech();
 +        } else {
 +            self.release_realtime_speaker();
 +        }
@@ -1211,7 +1200,7 @@ index e299500..de59734 100644
          let acknowledged = self
              .realtime_conversation
              .interruption_acknowledged_until
-@@ -253,6 +273,12 @@ impl ChatWidget {
+@@ -253,6 +272,12 @@ impl ChatWidget {
  
          let activity = if self.realtime_conversation.phase == RealtimeConversationPhase::Starting {
              "connecting"
@@ -1224,7 +1213,7 @@ index e299500..de59734 100644
          } else if self.realtime_conversation.microphone_muted {
              "muted"
          } else if self
-@@ -273,6 +299,9 @@ impl ChatWidget {
+@@ -273,6 +298,9 @@ impl ChatWidget {
          };
          self.bottom_pane.set_voice_strip(Some(VoiceStripState {
              mute_hint: self.chat_keymap.voice_mute_hint(),
@@ -1235,10 +1224,10 @@ index e299500..de59734 100644
                  VoiceStripPhase::Active
              } else {
 diff --git a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs b/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
-index 7a3b2a0..8f702bf 100644
+index 7a3b2a0..88d5bb2 100644
 --- a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
-@@ -29,6 +29,133 @@ fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question:
+@@ -29,6 +29,158 @@ fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question:
      );
  }
  
@@ -1335,7 +1324,7 @@ index 7a3b2a0..8f702bf 100644
 +}
 +
 +#[tokio::test]
-+async fn muted_voice_delivers_the_answer_in_chat_without_speech() {
++async fn muted_voice_keeps_the_acknowledgement_before_the_answer() {
 +    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
 +    let thread_id = activate_voice(&mut chat);
 +    chat.toggle_realtime_agent_speaker();
@@ -1346,6 +1335,7 @@ index 7a3b2a0..8f702bf 100644
 +        user_item("<realtime_delegation><input>my question</input></realtime_delegation>");
 +    start_item(&mut chat, thread_id, turn_id, delegation.clone());
 +    complete_item(&mut chat, thread_id, turn_id, delegation);
++    chat.on_realtime_transcript_delta("assistant".into(), "I'll take a look.".into());
 +    let answer = agent_item(
 +        "voice-answer",
 +        "Answer in the chat",
@@ -1360,10 +1350,34 @@ index 7a3b2a0..8f702bf 100644
 +        vec![answer],
 +        TurnStatus::Completed,
 +    );
-+    assert!(ops.try_recv().is_err());
-+    assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
-+        matches!(event, AppEvent::InsertHistoryCell(cell) if cell.transcript_lines(80).iter().any(|line| line.to_string().contains("Answer in the chat")))
-+    }));
++    let AppCommand::RealtimeConversationSpeech {
++        delivery_id, text, ..
++    } = ops.try_recv().unwrap()
++    else {
++        panic!("muted voice should use the same answer delivery as unmuted voice");
++    };
++    assert_eq!(text.as_str(), "Answer in the chat");
++    chat.toggle_realtime_agent_speaker();
++    chat.toggle_realtime_agent_speaker();
++    assert!(chat.has_pending_realtime_speech(delivery_id));
++    chat.accept_realtime_speech(delivery_id);
++
++    chat.on_realtime_transcript_done("assistant".into(), "I'll take a look.".into());
++    chat.on_realtime_transcript_delta("assistant".into(), text.as_str().into());
++    chat.on_realtime_transcript_done("assistant".into(), text.as_str().into());
++    commit_realtime_history_events(&mut chat, &mut events);
++    let replies = std::iter::from_fn(|| events.try_recv().ok())
++        .filter_map(|event| match event {
++            AppEvent::InsertHistoryCell(cell) => Some(cell.transcript_lines(80)),
++            _ => None,
++        })
++        .flatten()
++        .map(|line| line.to_string())
++        .filter(|line| line.contains("I'll take a look.") || line.contains("Answer in the chat"))
++        .collect::<Vec<_>>();
++    assert_eq!(replies, ["• I'll take a look.", "• Answer in the chat"]);
++    assert!(chat.realtime_conversation.speaker_muted);
++    assert!(chat.realtime_conversation.pending_speech.is_empty());
 +    chat.toggle_realtime_agent_speaker();
 +    assert!(!chat.realtime_conversation.speaker_muted);
 +    assert!(chat.realtime_conversation_is_running());
