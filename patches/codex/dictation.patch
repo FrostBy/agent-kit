@@ -244,10 +244,10 @@ index 8d4b3fe..5cc1367 100644
          /// This is an in-process override, not a client-supplied API parameter.
          /// `None` uses the configured endpoint or the default public API.
 diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
-index 9e73ea4..7fd36f7 100644
+index 9e73ea4..3554528 100644
 --- a/codex-rs/tui/src/app.rs
 +++ b/codex-rs/tui/src/app.rs
-@@ -1192,7 +1192,7 @@ impl App {
+@@ -1192,10 +1192,21 @@ impl App {
              && self.keymap.chat.toggle_voice_mute.is_pressed(*key_event)
          {
              if !self.chat_widget.handle_startup_submission_key(*key_event) {
@@ -256,11 +256,25 @@ index 9e73ea4..7fd36f7 100644
              }
              return Ok(AppRunControl::Continue);
          }
++        if let TuiEvent::Key(key) = &event
++            && key.kind == KeyEventKind::Press
++            && key.code == KeyCode::F(10)
++            && key.modifiers == KeyModifiers::NONE
++            && self.overlay.is_none()
++            && !self.chat_widget.realtime_dictation_active()
++            && self.chat_widget.realtime_microphone_shortcut_available()
++        {
++            self.chat_widget.toggle_realtime_agent_speaker();
++            return Ok(AppRunControl::Continue);
++        }
+         if self.reconnect.offline
+             && !self.chat_widget.keymap_contexts().is_warnings()
+             && !matches!(&self.overlay, Some(Overlay::Transcript(_)))
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index eeebcba..8abaf2a 100644
+index 8737ac9..231dd53 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -2473,7 +2473,7 @@ impl App {
+@@ -2481,7 +2481,7 @@ impl App {
                      let result = match result {
                          Ok(call) => {
                              owner.accept_realtime_call(call.answer_sdp);
@@ -347,10 +361,10 @@ index 3b0af9f..37d8635 100644
              self.chat_widget.toggle_realtime_microphone();
          }
 diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
-index f900fa5..18daba6 100644
+index 9c10c50..31894f0 100644
 --- a/codex-rs/tui/src/app_event.rs
 +++ b/codex-rs/tui/src/app_event.rs
-@@ -83,6 +83,7 @@ pub(crate) enum VoiceControl {
+@@ -84,6 +84,7 @@ pub(crate) enum VoiceControl {
      Toggle,
      Stop,
      Mute,
@@ -384,64 +398,579 @@ index 721dcdc..a84fb30 100644
                      }),
                      version: Some(RealtimeConversationVersion::V3),
                      voice: None,
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer.rs b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+index 639eb39..93f5d2b 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+@@ -826,6 +826,7 @@ impl ChatComposer {
+                 reasoning_up_key: default_keymap
+                     .primary_hint(KeymapContext::Chat, "increase_reasoning_effort"),
+                 toggle_voice_key: default_keymap.primary_hint(KeymapContext::Chat, "toggle_voice"),
++                dictate_key: default_keymap.primary_hint(KeymapContext::Chat, "toggle_voice_mute"),
+             }),
+             has_focus: has_input_focus,
+             frame_requester: None,
+@@ -1132,6 +1133,7 @@ impl ChatComposer {
+         self.footer.reasoning_up_key =
+             keymap.primary_hint(KeymapContext::Chat, "increase_reasoning_effort");
+         self.footer.toggle_voice_key = keymap.primary_hint(KeymapContext::Chat, "toggle_voice");
++        self.footer.dictate_key = keymap.primary_hint(KeymapContext::Chat, "toggle_voice_mute");
+     }
+ 
+     /// Return the contexts whose handlers can consume the next composer key.
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs b/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs
+index c7a70df..bb34d97 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs
+@@ -136,6 +136,12 @@ impl super::ChatComposer {
+                     .footer
+                     .toggle_voice_key
+                     .filter(|_| self.voice_command_enabled && !self.side_conversation_active),
++                dictate: self.footer.dictate_key.filter(|_| {
++                    mode == FooterMode::ComposerEmpty
++                        && self.voice_command_enabled
++                        && self.voice_strip.is_none()
++                        && !self.side_conversation_active
++                }),
+             },
+             active_agent_label: self.footer.active_agent_label.clone(),
+         }
+@@ -402,6 +408,7 @@ pub(super) struct FooterState {
+     pub(super) reasoning_down_key: Option<ShortcutHint>,
+     pub(super) reasoning_up_key: Option<ShortcutHint>,
+     pub(super) toggle_voice_key: Option<ShortcutHint>,
++    pub(super) dictate_key: Option<ShortcutHint>,
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/passive_hints.rs b/codex-rs/tui/src/bottom_pane/chat_composer/passive_hints.rs
+index 4aac82f..9f8b552 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/passive_hints.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/passive_hints.rs
+@@ -17,6 +17,8 @@ use ratatui::style::Styled;
+ enum Kind {
+     Agents,
+     Shortcuts,
++    Dictation,
++    VoiceShortcut,
+     Action,
+     Side,
+     SideNav,
+@@ -38,12 +40,20 @@ impl Kind {
+     }
+ 
+     fn left(self) -> bool {
+-        matches!(self, Agents | Shortcuts | Action | Side | SideNav)
++        matches!(
++            self,
++            Agents | Shortcuts | Dictation | VoiceShortcut | Action | Side | SideNav
++        )
+     }
+ 
+     fn row(self, two_rows: bool) -> usize {
+         usize::from(
+-            two_rows && !self.is_input_mode() && !matches!(self, Agents | Shortcuts | SideNav),
++            two_rows
++                && !self.is_input_mode()
++                && !matches!(
++                    self,
++                    Agents | Shortcuts | Dictation | VoiceShortcut | SideNav
++                ),
+         )
+     }
+ }
+@@ -147,6 +157,8 @@ impl Hints {
+             (Action, Some(1)),
+             (Warning, Some(2)),
+             (Agents, None),
++            (VoiceShortcut, None),
++            (Dictation, None),
+         ] {
+             if p[kind.row(two)].width() <= width {
+                 continue;
+@@ -176,8 +188,21 @@ impl Hints {
+             }
+         }
+         for kind in [
+-            Action, Side, Shell, Vim, Plan, Goal, Ide, Warning, Context, SideNav, AgentName,
+-            Agents, Shortcuts,
++            Action,
++            Side,
++            Shell,
++            Vim,
++            Plan,
++            Goal,
++            Ide,
++            Warning,
++            Context,
++            SideNav,
++            AgentName,
++            Agents,
++            Dictation,
++            VoiceShortcut,
++            Shortcuts,
+         ] {
+             if !overflow[kind.row(two)] {
+                 continue;
+@@ -326,6 +351,15 @@ impl ChatComposer {
+             if let Some(key) = self.footer.toggle_shortcuts_key {
+                 hints.add(Shortcuts, [shortcut(key, " for shortcuts")]);
+             }
++            let key_hints = self.footer_props().key_hints;
++            if let Some(key) = key_hints.dictate {
++                hints.add(Dictation, [shortcut(key, " dictate")]);
++            }
++            if self.voice_strip.is_none()
++                && let Some(key) = key_hints.toggle_voice
++            {
++                hints.add(VoiceShortcut, [shortcut(key, " voice")]);
++            }
+         }
+         let show_warning = self.show_warning_notice(options);
+         if !self.footer.status_line_enabled
 diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs b/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs
-index df7cec2..2ba6a86 100644
+index df7cec2..0061718 100644
 --- a/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs
 +++ b/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs
-@@ -12,6 +12,22 @@ use crate::bottom_pane::paste_burst::FlushResult;
+@@ -12,6 +12,34 @@ use crate::bottom_pane::paste_burst::FlushResult;
  use crate::bottom_pane::textarea::EditTarget;
  
  impl ChatComposer {
-+    pub(in crate::bottom_pane) fn append_dictation(&mut self, text: &str) {
++    pub(in crate::bottom_pane) fn append_dictation(&mut self, text: &str, new_segment: bool) {
 +        self.flush_pending_input();
-+        self.move_cursor_to_end();
-+        let current = self.current_text();
-+        let text = if current.is_empty() || current.ends_with(char::is_whitespace) {
-+            text.to_string()
-+        } else {
++        let current = self.draft.textarea.text();
++        let end = current.len();
++        let insert = if new_segment
++            && !current.is_empty()
++            && !current.ends_with(char::is_whitespace)
++            && !text.starts_with(char::is_whitespace)
++        {
 +            format!(" {text}")
++        } else {
++            text.to_string()
 +        };
-+        self.insert_str_at_target(
-+            self.draft.textarea.edit_target(),
-+            &text,
-+            ShellPrefixHandling::Literal,
-+        );
++        self.draft.textarea.replace_range(end..end, &insert);
++        self.sync_popups();
++    }
++
++    pub(in crate::bottom_pane) fn finish_dictation(&mut self, partial: &str, text: &str) {
++        self.flush_pending_input();
++        let current = self.draft.textarea.text();
++        // The user can edit the draft while the recognizer is finalizing a phrase.
++        if let Some(prefix) = current.strip_suffix(partial) {
++            let range = prefix.len()..current.len();
++            self.draft.textarea.replace_range(range, text);
++            self.sync_popups();
++        }
 +    }
 +
      pub(crate) fn insert_str(&mut self, text: &str) {
          self.insert_str_at_target(
              self.draft.textarea.edit_target(),
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/snapshot_tests.rs b/codex-rs/tui/src/bottom_pane/chat_composer/snapshot_tests.rs
+index f15a360..3d9a8a9 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/snapshot_tests.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/snapshot_tests.rs
+@@ -108,9 +108,12 @@ fn draft_and_voice_composer_snapshots() {
+                     composer.set_voice_strip(
+                         Some(VoiceStripState {
+                             mute_hint: None,
++                            stop_hint: None,
+                             phase: VoiceStripPhase::Active,
+                             microphone_live: true,
+                             microphone_muted: false,
++                            dictation: false,
++                            speaker_muted: false,
+                             microphone_history: vec![0, 37, 73, 110, 146, 255],
+                             speaker_history: vec![255, 146, 110, 73, 37, 0],
+                             activity: "listening",
+@@ -155,3 +158,37 @@ fn draft_and_voice_composer_snapshots() {
+         },
+     );
+ }
++
++#[test]
++fn dictation_hint_uses_configured_binding_and_availability() {
++    let config =
++        toml::from_str("[chat]\ntoggle_voice_mute = 'ctrl-x m'\ntoggle_voice = 'ctrl-x v'")
++            .unwrap();
++    let keymap = RuntimeKeymap::from_config(&config).unwrap();
++    let (mut composer, _rx) = new_test_composer();
++    composer.set_keymap_bindings(&keymap);
++    assert_eq!(composer.footer_props().key_hints.dictate, None);
++    composer.set_voice_command_enabled(true);
++    assert_eq!(
++        composer
++            .footer_props()
++            .key_hints
++            .dictate
++            .unwrap()
++            .display_label(),
++        "⌃x m"
++    );
++    let area = Rect::new(0, 0, 100, composer.desired_height(100));
++    let mut buffer = Buffer::empty(area);
++    composer.render(area, &mut buffer);
++    let rendered = buffer
++        .content
++        .iter()
++        .map(ratatui::buffer::Cell::symbol)
++        .collect::<String>();
++    assert!(rendered.contains("⌃x m dictate"));
++    assert!(rendered.contains("⌃x v voice"));
++    assert!(rendered.contains("? for shortcuts"));
++    composer.side_conversation_active = true;
++    assert_eq!(composer.footer_props().key_hints.dictate, None);
++}
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/snapshots/codex_tui__bottom_pane__chat_composer__snapshot_tests__voice_composer.snap b/codex-rs/tui/src/bottom_pane/chat_composer/snapshots/codex_tui__bottom_pane__chat_composer__snapshot_tests__voice_composer.snap
+index 3b89309..bc0348f 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/snapshots/codex_tui__bottom_pane__chat_composer__snapshot_tests__voice_composer.snap
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/snapshots/codex_tui__bottom_pane__chat_composer__snapshot_tests__voice_composer.snap
+@@ -3,7 +3,7 @@ source: tui/src/bottom_pane/chat_composer/snapshot_tests.rs
+ expression: rows
+ ---
+                                                             
+- voice ● listening                /voice mute   /voice stop 
++ voice           /voice mute   f10 mute agent   /voice stop 
+                                                             
+ › Ask Codex to do anything                                  
+                                                             
+diff --git a/codex-rs/tui/src/bottom_pane/footer.rs b/codex-rs/tui/src/bottom_pane/footer.rs
+index 5cbcdfb..45a441d 100644
+--- a/codex-rs/tui/src/bottom_pane/footer.rs
++++ b/codex-rs/tui/src/bottom_pane/footer.rs
+@@ -106,6 +106,7 @@ pub(crate) struct FooterKeyHints {
+     pub(crate) reasoning_down: Option<ShortcutHint>,
+     pub(crate) reasoning_up: Option<ShortcutHint>,
+     pub(crate) toggle_voice: Option<ShortcutHint>,
++    pub(crate) dictate: Option<ShortcutHint>,
+ }
+ 
+ impl FooterKeyHints {
+@@ -125,6 +126,7 @@ impl FooterKeyHints {
+             reasoning_down: Some(key_hint::alt(KeyCode::Char(',')).into()),
+             reasoning_up: Some(key_hint::alt(KeyCode::Char('.')).into()),
+             toggle_voice: Some(key_hint::plain(KeyCode::F(8)).into()),
++            dictate: None,
+         }
+     }
+ }
+@@ -317,6 +319,13 @@ fn left_side_line(
+                 line.extend(key.spans());
+                 line.push_span(" for shortcuts".set_style(secondary_text_style()));
+             }
++            if let Some(key) = key_hints.dictate {
++                if !line.spans.is_empty() {
++                    line.push_span(" · ".set_style(secondary_text_style()));
++                }
++                line.extend(key.spans());
++                line.push_span(" dictate".set_style(secondary_text_style()));
++            }
+         }
+         SummaryHintKind::QueueMessage => {
+             if let Some(key) = key_hints.queue {
 diff --git a/codex-rs/tui/src/bottom_pane/mod.rs b/codex-rs/tui/src/bottom_pane/mod.rs
-index 226dbee..436b2ee 100644
+index 7daed69..e7ab853 100644
 --- a/codex-rs/tui/src/bottom_pane/mod.rs
 +++ b/codex-rs/tui/src/bottom_pane/mod.rs
-@@ -1249,6 +1249,11 @@ impl BottomPane {
+@@ -1251,6 +1251,16 @@ impl BottomPane {
          self.request_redraw();
      }
  
-+    pub(crate) fn append_dictation(&mut self, text: &str) {
-+        self.composer.append_dictation(text);
++    pub(crate) fn append_dictation(&mut self, text: &str, new_segment: bool) {
++        self.composer.append_dictation(text, new_segment);
++        self.request_redraw();
++    }
++
++    pub(crate) fn finish_dictation(&mut self, partial: &str, text: &str) {
++        self.composer.finish_dictation(partial, text);
 +        self.request_redraw();
 +    }
 +
      /// Get the current composer text (for tests and programmatic checks).
      pub(crate) fn composer_text(&self) -> String {
          self.composer.current_text()
+diff --git a/codex-rs/tui/src/bottom_pane/voice_strip.rs b/codex-rs/tui/src/bottom_pane/voice_strip.rs
+index 5e3aa75..52ee477 100644
+--- a/codex-rs/tui/src/bottom_pane/voice_strip.rs
++++ b/codex-rs/tui/src/bottom_pane/voice_strip.rs
+@@ -28,9 +28,12 @@ pub(crate) enum VoiceStripPhase {
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ pub(crate) struct VoiceStripState {
+     pub(crate) mute_hint: Option<ShortcutHint>,
++    pub(crate) stop_hint: Option<ShortcutHint>,
+     pub(crate) phase: VoiceStripPhase,
+     pub(crate) microphone_live: bool,
+     pub(crate) microphone_muted: bool,
++    pub(crate) dictation: bool,
++    pub(crate) speaker_muted: bool,
+     pub(crate) microphone_history: Vec<u8>,
+     pub(crate) speaker_history: Vec<u8>,
+     pub(crate) activity: &'static str,
+@@ -94,54 +97,75 @@ impl Renderable for VoiceStrip {
+         } else {
+             "◌".dark_gray()
+         };
++        let label = if self.state.dictation {
++            "dictation"
++        } else {
++            "voice"
++        };
+         let activity = format!(" {}", self.state.activity).into();
+-        let mut status = Line::from(vec!["voice ".dim(), marker, activity]);
+-        let mute = self.state.mute_hint.map_or_else(
++        let mut status = Line::from(vec![format!("{label} ").dim(), marker, activity]);
++        let can_mute = !connecting || self.state.microphone_live || self.state.microphone_muted;
++        let action = if self.state.dictation {
++            if self.state.microphone_muted {
++                "resume"
++            } else {
++                "pause"
++            }
++        } else if self.state.microphone_muted {
++            "unmute"
++        } else {
++            "mute"
++        };
++        let mic = self.state.mute_hint.map_or_else(
+             || "/voice mute".to_string(),
+-            |hint| {
+-                format!(
+-                    "{} {}",
+-                    hint.display_label(),
+-                    if self.state.microphone_muted {
+-                        "unmute"
+-                    } else {
+-                        "mute  "
+-                    }
+-                )
+-            },
++            |hint| format!("{} {action}", hint.display_label()),
++        );
++        let stop = self.state.stop_hint.map_or_else(
++            || "/voice stop".to_string(),
++            |hint| format!("{} stop", hint.display_label()),
+         );
+-        let full_controls = format!("{mute}   /voice stop");
++        let speaker = if self.state.speaker_muted {
++            "f10 unmute agent"
++        } else {
++            "f10 mute agent"
++        };
++        let controls = if can_mute {
++            if self.state.dictation {
++                format!("{mic}   {stop}")
++            } else {
++                format!("{mic}   {speaker}   {stop}")
++            }
++        } else {
++            stop.clone()
++        };
+         let available = usize::from(area.width);
+-        let can_mute = !connecting || self.state.microphone_live || self.state.microphone_muted;
+-        if can_mute
+-            && available < status.width() + full_controls.width() + 1
+-            && available >= "voice ".len() + full_controls.width() + 2
+-        {
+-            status.spans.pop();
+-        }
+-        let show_full_controls = can_mute && available > status.width() + full_controls.width();
+-        let controls = if show_full_controls {
+-            full_controls.as_str()
++        let compact = if can_mute && !self.state.dictation {
++            format!("{mic}   {speaker}")
++        } else if can_mute {
++            mic.clone()
+         } else {
+-            "/voice stop"
++            controls.clone()
++        };
++        let controls = if available >= status.width() + controls.width() + 1 {
++            controls
++        } else {
++            status = Line::from(vec![label.dim()]);
++            if available >= status.width() + controls.width() + 1 {
++                controls
++            } else if available >= status.width() + compact.width() + 1 {
++                compact
++            } else if can_mute && !self.state.dictation && available >= speaker.len() {
++                status = Line::default();
++                speaker.to_string()
++            } else {
++                stop
++            }
+         };
+-        if available < status.width() + controls.width() + 1 {
+-            status = Line::from(vec!["voice".dim()]);
+-        }
+         status.spans.push(
+             " ".repeat(available.saturating_sub(status.width() + controls.width()))
+                 .into(),
+         );
+-        if show_full_controls && let Some(hint) = self.state.mute_hint {
+-            status.spans.extend(hint.spans());
+-            status.spans.push(if self.state.microphone_muted {
+-                " unmute   /voice stop".dim()
+-            } else {
+-                " mute     /voice stop".dim()
+-            });
+-        } else {
+-            status.spans.push(controls.dim());
+-        }
++        status.spans.push(controls.dim());
+         Paragraph::new(status).render(Rect::new(area.x, area.y, area.width, /*height*/ 1), buf);
+         if !self.state.animations || area.height < 2 {
+             return;
+diff --git a/codex-rs/tui/src/bottom_pane/voice_strip_tests.rs b/codex-rs/tui/src/bottom_pane/voice_strip_tests.rs
+index 208544c..bd461da 100644
+--- a/codex-rs/tui/src/bottom_pane/voice_strip_tests.rs
++++ b/codex-rs/tui/src/bottom_pane/voice_strip_tests.rs
+@@ -11,9 +11,12 @@ fn active_strip() -> VoiceStrip {
+             mute_hint: crate::keymap::RuntimeKeymap::defaults()
+                 .chat
+                 .voice_mute_hint(),
++            stop_hint: None,
+             phase: VoiceStripPhase::Active,
+             microphone_live: true,
+             microphone_muted: false,
++            dictation: false,
++            speaker_muted: false,
+             microphone_history: vec![
+                 0, 1, 37, 73, 110, 146, 183, 219, 183, 146, 110, 73, 37, 1, 0,
+             ],
+@@ -49,24 +52,21 @@ fn rows(strip: &VoiceStrip, width: u16) -> (String, Buffer) {
+ fn active_dashboard_preserves_live_colors_controls_and_width() {
+     let mut strip = active_strip();
+     strip.state.progress = false;
+-    let (actual, buffer) = rows(&strip, /*width*/ 47);
+-    assert_eq!(buffer[(45, 0)].symbol(), "p");
+-    assert_eq!(buffer[(46, 0)].symbol(), " ");
++    let (actual, buffer) = rows(&strip, /*width*/ 70);
++    assert_eq!(buffer[(68, 0)].symbol(), "p");
++    assert_eq!(buffer[(69, 0)].symbol(), " ");
+     assert!(actual.starts_with(" voice "));
+     assert!(actual.lines().nth(1).unwrap().starts_with("   mic "));
+-    insta::assert_snapshot!(actual, @"
+-    voice ● listening     f9 mute     /voice stop
+-      mic ▆▅▄▃▂▁  codex ▁▃▄▅▆█
+-    ");
++    assert!(actual.contains("f10 mute agent"));
+     assert_eq!(buffer[(7, 0)].fg, Color::Red);
+     assert_eq!(buffer[(7, 1)].fg, Color::Cyan);
+     assert_eq!(buffer[(22, 1)].fg, Color::Magenta);
+     assert!(actual.contains("/voice stop"));
+     let (compact, buffer) = rows(&strip, /*width*/ 37);
+-    assert!(compact.contains("f9 mute") && compact.contains("/voice stop"));
++    assert!(compact.contains("f9 mute") && compact.contains("f10 mute agent"));
+     assert_eq!(buffer[(36, 0)].symbol(), " ");
+     let (narrow, buffer) = rows(&strip, /*width*/ 22);
+-    assert!(narrow.contains("/voice stop"));
++    assert!(narrow.contains("f10 mute agent"));
+     assert_eq!(buffer[(21, 0)].symbol(), " ");
+     assert!(narrow.contains("mic") && narrow.contains("codex"));
+     let started_at = strip.started_at;
+@@ -99,12 +99,12 @@ fn connecting_and_muted_indicators_follow_actual_capture() {
+     strip.state.animations = true;
+     strip.state.activity = "listening";
+     strip.state.microphone_history = vec![255];
+-    let (reduced, _) = rows(&strip, /*width*/ 45);
++    let (reduced, _) = rows(&strip, /*width*/ 70);
+     assert!(reduced.lines().nth(1).unwrap().contains('█'));
+     let stop_column = reduced.lines().next().unwrap().find("/voice stop");
+     strip.state.microphone_muted = true;
+     strip.state.activity = "muted";
+-    let (muted, buffer) = rows(&strip, /*width*/ 45);
++    let (muted, buffer) = rows(&strip, /*width*/ 70);
+     assert!(muted.contains("voice ◌ muted"));
+     assert!(
+         muted
+@@ -140,7 +140,6 @@ fn waveform_preserves_real_sample_order_width_and_channel_colors() {
+ #[test]
+ fn voice_controls_follow_configured_mute_binding_and_unbinding() {
+     let mut strip = active_strip();
+-    let mut layouts = Vec::new();
+     for (binding, expected) in [
+         ("'f8'", "f8 mute"),
+         ("'ctrl-x m'", "⌃x m mute"),
+@@ -157,13 +156,39 @@ fn voice_controls_follow_configured_mute_binding_and_unbinding() {
+         for muted in [false, true] {
+             strip.state.microphone_muted = muted;
+             strip.state.activity = if muted { "muted" } else { "listening" };
+-            for width in [80, 22] {
+-                let (text, _) = rows(&strip, width);
+-                layouts.push(format!("{binding}, muted={muted}, width={width}:\n{text}"));
+-            }
++            let (text, _) = rows(&strip, 80);
++            assert!(text.contains("f10 mute agent"));
++            assert!(text.contains(if muted && binding != "[]" {
++                "unmute"
++            } else {
++                expected
++            }));
++            let (narrow, _) = rows(&strip, 22);
++            assert!(narrow.contains("f10 mute agent"));
+         }
+         strip.state.microphone_muted = false;
+         strip.state.activity = "listening";
+     }
+-    insta::assert_snapshot!(layouts.join("\n\n"));
++}
++
++#[test]
++fn dictation_and_speaker_controls_follow_state() {
++    let mut strip = active_strip();
++    strip.state.stop_hint = crate::keymap::RuntimeKeymap::defaults()
++        .chat
++        .voice_toggle_hint();
++    let (voice, _) = rows(&strip, 70);
++    assert!(voice.contains("f9 mute") && voice.contains("f10 mute agent"));
++    assert!(voice.contains("f8 stop"));
++    strip.state.speaker_muted = true;
++    let (muted, _) = rows(&strip, 70);
++    assert!(muted.contains("f10 unmute agent"));
++    strip.state.dictation = true;
++    let (dictation, _) = rows(&strip, 70);
++    assert!(dictation.contains("dictation") && dictation.contains("f9 pause"));
++    assert!(!dictation.contains("f10"));
++    assert!(dictation.contains("f8 stop"));
++    strip.state.microphone_muted = true;
++    let (paused, _) = rows(&strip, 70);
++    assert!(paused.contains("f9 resume"));
+ }
+diff --git a/codex-rs/tui/src/chatwidget/input_flow.rs b/codex-rs/tui/src/chatwidget/input_flow.rs
+index f4fa6ce..9cbb65c 100644
+--- a/codex-rs/tui/src/chatwidget/input_flow.rs
++++ b/codex-rs/tui/src/chatwidget/input_flow.rs
+@@ -23,6 +23,12 @@ impl ChatWidget {
+         input_result: InputResult,
+         had_modal_or_popup: bool,
+     ) {
++        if matches!(
++            input_result,
++            InputResult::Submitted { .. } | InputResult::Queued { .. }
++        ) {
++            self.note_dictation_draft_submitted();
++        }
+         let follow_transcript = match &input_result {
+             // Opening settings is not a request to leave the current reading anchor.
+             // Inline commands still follow so their output (including usage errors) is visible.
 diff --git a/codex-rs/tui/src/chatwidget/realtime.rs b/codex-rs/tui/src/chatwidget/realtime.rs
-index cdffddc..5377a59 100644
+index cdffddc..f8f870f 100644
 --- a/codex-rs/tui/src/chatwidget/realtime.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime.rs
-@@ -142,6 +142,9 @@ pub(super) struct RealtimeConversationUiState {
+@@ -142,6 +142,11 @@ pub(super) struct RealtimeConversationUiState {
      session_lock: Option<session_lock::SessionLock>,
      pub(super) phase: RealtimeConversationPhase,
      recover_late_transcripts: bool,
 +    dictation: bool,
-+    dictation_buffer: String,
 +    dictation_partial: String,
++    dictation_new_segment: bool,
++    dictation_sent_bytes: usize,
++    speaker_muted: bool,
      attempt_id: u64,
      thread_id: Option<ThreadId>,
      pub(super) handle: Option<RealtimeWebrtcSessionHandle>,
-@@ -262,6 +265,22 @@ impl ChatWidget {
+@@ -262,6 +267,22 @@ impl ChatWidget {
      }
  
      pub(crate) fn toggle_realtime_conversation(&mut self) {
@@ -464,7 +993,7 @@ index cdffddc..5377a59 100644
          if self.realtime_conversation.phase == RealtimeConversationPhase::Stopping {
              self.realtime_conversation.startup_retry = StartupRetry::Used;
              self.add_info_message(
-@@ -309,6 +328,7 @@ impl ChatWidget {
+@@ -309,6 +330,7 @@ impl ChatWidget {
  
          self.session_telemetry
              .counter("codex.voice.session.start", /*inc*/ 1, &[]);
@@ -472,55 +1001,140 @@ index cdffddc..5377a59 100644
          self.start_realtime_conversation(thread_id);
      }
  
-@@ -444,6 +464,9 @@ impl ChatWidget {
+@@ -444,6 +466,9 @@ impl ChatWidget {
              self.on_realtime_error(message, cause);
              return;
          }
-+        if self.realtime_conversation.dictation {
++        if self.realtime_conversation.dictation || self.realtime_conversation.speaker_muted {
 +            offer.handle.set_speaker_suppressed(true);
 +        }
          self.realtime_conversation.handle = Some(offer.handle);
          self.update_realtime_footer();
          self.refresh_terminal_title();
-@@ -1315,6 +1338,17 @@ impl ChatWidget {
+@@ -605,10 +630,23 @@ impl ChatWidget {
+         self.update_realtime_footer();
+         self.frame_requester
+             .schedule_frame_in(MICROPHONE_METER_INTERVAL);
+-        self.add_info_message(
+-            "Voice conversation started.".to_string(),
+-            Some("Use /voice mute to mute or /voice to stop.".to_string()),
+-        );
++        if self.realtime_conversation.dictation {
++            let pause = self.chat_keymap.voice_mute_hint().map_or_else(
++                || "/voice mute".to_string(),
++                |hint| hint.display_label().to_string(),
++            );
++            self.add_info_message(
++                "Dictation started.".to_string(),
++                Some(format!(
++                    "{pause} to pause or resume. Enter sends the draft."
++                )),
++            );
++        } else {
++            self.add_info_message(
++                "Voice conversation started.".to_string(),
++                Some("Use /voice mute to mute or /voice to stop.".to_string()),
++            );
++        }
+     }
+ 
+     pub(crate) fn is_current_realtime_attempt(
+@@ -624,7 +662,18 @@ impl ChatWidget {
+             && self.realtime_conversation.latest_input_was_voice
+     }
+ 
++    pub(super) fn note_dictation_draft_submitted(&mut self) {
++        if self.realtime_conversation.dictation {
++            // The transcript can finalize after Enter, even while the message is queued.
++            self.realtime_conversation.dictation_sent_bytes =
++                self.realtime_conversation.dictation_partial.len();
++        }
++    }
++
+     pub(super) fn note_realtime_typed_input(&mut self, text: &str) {
++        if self.realtime_conversation.dictation {
++            return;
++        }
+         self.invalidate_realtime_voice_input();
+         if self.realtime_conversation.phase == RealtimeConversationPhase::Active {
+             self.realtime_conversation.pending_typed_input = Some(text.to_string());
+@@ -1034,7 +1083,8 @@ impl ChatWidget {
+             return;
+         }
+         *may_speak = false;
+-        if !can_retain_realtime_speech(turn_id, item)
++        if self.realtime_conversation.speaker_muted
++            || !can_retain_realtime_speech(turn_id, item)
+             || codex_utils_string::approx_token_count(&text) > MAX_SPEAKABLE_FINAL_TOKENS
+         {
+             self.remove_waiting_realtime_speech(turn_id, item_id);
+@@ -1315,6 +1365,32 @@ impl ChatWidget {
      }
  
      pub(super) fn on_realtime_transcript_delta(&mut self, role: String, delta: String) {
 +        if self.realtime_conversation.dictation {
 +            if role == "user"
-+                && self.realtime_conversation.dictation_partial.len() + delta.len()
-+                    <= MAX_TRANSCRIPT_BYTES
++                && self.realtime_conversation.thread_id == self.thread_id()
++                && !delta.is_empty()
 +            {
-+                self.realtime_conversation
-+                    .dictation_partial
-+                    .push_str(&delta);
++                let voice = &mut self.realtime_conversation;
++                if std::mem::take(&mut voice.dictation_new_segment) {
++                    voice.dictation_partial.clear();
++                    voice.dictation_sent_bytes = 0;
++                }
++                let mut visible = delta.as_str();
++                if voice.dictation_sent_bytes > 0
++                    && voice.dictation_partial[voice.dictation_sent_bytes..]
++                        .trim()
++                        .is_empty()
++                {
++                    visible = visible.trim_start();
++                }
++                if !visible.is_empty() {
++                    self.bottom_pane
++                        .append_dictation(visible, voice.dictation_partial.is_empty());
++                }
++                voice.dictation_partial.push_str(&delta);
 +            }
 +            return;
 +        }
          if self.realtime_conversation.phase == RealtimeConversationPhase::Inactive
              && !self.realtime_conversation.recover_late_transcripts
          {
-@@ -1458,6 +1492,27 @@ impl ChatWidget {
+@@ -1458,6 +1534,40 @@ impl ChatWidget {
      }
  
      pub(super) fn on_realtime_transcript_done(&mut self, role: String, mut text: String) {
 +        if self.realtime_conversation.dictation {
 +            if role == "user" && self.realtime_conversation.thread_id == self.thread_id() {
-+                let partial = std::mem::take(&mut self.realtime_conversation.dictation_partial);
-+                let text = if text.trim().is_empty() {
-+                    partial.trim()
-+                } else {
-+                    text.trim()
-+                };
-+                if !text.is_empty() {
-+                    let draft = &mut self.realtime_conversation.dictation_buffer;
-+                    if !draft.is_empty() {
-+                        draft.push(' ');
++                let voice = &mut self.realtime_conversation;
++                if !text.trim().is_empty() {
++                    if voice.dictation_partial.is_empty()
++                        || (voice.dictation_new_segment
++                            && !text.starts_with(&voice.dictation_partial))
++                    {
++                        voice.dictation_partial.clear();
++                        voice.dictation_sent_bytes = 0;
++                        voice.dictation_new_segment = false;
++                        self.bottom_pane.append_dictation(text.trim(), true);
++                    } else if text.starts_with(&voice.dictation_partial) {
++                        let partial = std::mem::take(&mut voice.dictation_partial);
++                        let sent = std::mem::take(&mut voice.dictation_sent_bytes);
++                        if sent == 0 {
++                            self.bottom_pane.finish_dictation(&partial, &text);
++                        } else {
++                            let visible = partial[sent..].trim_start();
++                            let remainder = text[sent..].trim_start();
++                            if visible.is_empty() {
++                                if !remainder.is_empty() {
++                                    self.bottom_pane.append_dictation(remainder, true);
++                                }
++                            } else {
++                                self.bottom_pane.finish_dictation(visible, remainder);
++                            }
++                        }
 +                    }
-+                    draft.push_str(text);
-+                    if self.realtime_conversation.microphone_muted {
-+                        self.flush_realtime_dictation();
-+                    }
++                    // A delayed V3 final can belong to an older phrase; keep the visible draft.
 +                }
 +            }
 +            return;
@@ -528,82 +1142,103 @@ index cdffddc..5377a59 100644
          if matches!(
              self.realtime_conversation.phase,
              RealtimeConversationPhase::Inactive | RealtimeConversationPhase::Stopping
-@@ -1687,7 +1742,19 @@ impl ChatWidget {
-         }
+@@ -1688,6 +1798,11 @@ impl ChatWidget {
      }
  
-+    fn flush_realtime_dictation(&mut self) {
-+        let text = std::mem::take(&mut self.realtime_conversation.dictation_buffer);
-+        if !text.is_empty() {
-+            self.bottom_pane.append_dictation(&text);
-+        }
-+    }
-+
      fn finish_realtime_partial_transcripts(&mut self) {
 +        if self.realtime_conversation.dictation {
-+            self.on_realtime_transcript_done("user".into(), String::new());
-+            self.flush_realtime_dictation();
++            self.realtime_conversation.dictation_partial.clear();
++            self.realtime_conversation.dictation_sent_bytes = 0;
 +            return;
 +        }
          if let Some((role, text)) = self.realtime_conversation.interleaved_transcript.take() {
              self.realtime_conversation.interleaved_transcript_cell = None;
              self.on_realtime_transcript_done(role, text);
-@@ -1785,6 +1852,7 @@ impl ChatWidget {
+@@ -1785,6 +1900,8 @@ impl ChatWidget {
          self.restore_all_undelivered_realtime_speech();
          self.finish_realtime_partial_transcripts();
          let muted = self.realtime_conversation.microphone_muted;
 +        let dictation = self.realtime_conversation.dictation;
++        let speaker_muted = self.realtime_conversation.speaker_muted;
          let thread_id = self.realtime_conversation.thread_id;
          let retry_thread_id = if retry_after_stop || retry_after_early_close {
              thread_id.filter(|id| Some(*id) == self.thread_id())
-@@ -1811,6 +1879,7 @@ impl ChatWidget {
+@@ -1811,6 +1928,8 @@ impl ChatWidget {
              // The old backend is closed. A late peer result belongs to its attempt ID.
              self.realtime_conversation.startup_retry = StartupRetry::Used;
              self.realtime_conversation.microphone_muted = muted;
 +            self.realtime_conversation.dictation = dictation;
++            self.realtime_conversation.speaker_muted = speaker_muted;
              if retry_after_early_close {
                  self.add_info_message(
                      "Voice connection closed during startup. Retrying once.".into(),
 diff --git a/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs b/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
-index e299500..0bf52e8 100644
+index e299500..de59734 100644
 --- a/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
-@@ -29,6 +29,7 @@ impl ChatWidget {
+@@ -28,6 +28,9 @@ impl ChatWidget {
+         self.realtime_conversation.microphone_muted = muted;
          self.realtime_conversation.microphone_level = 0;
          self.realtime_conversation.microphone_intensity = 0;
++        if self.realtime_conversation.dictation && !muted {
++            self.realtime_conversation.dictation_new_segment = true;
++        }
          if muted {
-+            self.flush_realtime_dictation();
              self.realtime_conversation.microphone_history = VoiceAmplitudeHistory::default();
              for (microphone, _) in &mut self.realtime_conversation.audio_meter_history {
-                 *microphone = 0;
-@@ -60,6 +61,9 @@ impl ChatWidget {
+@@ -59,7 +62,24 @@ impl ChatWidget {
+             }
      }
  
++    pub(crate) fn toggle_realtime_agent_speaker(&mut self) {
++        if self.realtime_conversation.dictation || !self.realtime_microphone_shortcut_available() {
++            return;
++        }
++        self.realtime_conversation.speaker_muted = !self.realtime_conversation.speaker_muted;
++        if self.realtime_conversation.speaker_muted {
++            self.suppress_realtime_speaker();
++            self.restore_all_undelivered_realtime_speech();
++        } else {
++            self.release_realtime_speaker();
++        }
++        self.update_realtime_footer();
++    }
++
      pub(super) fn release_realtime_speaker(&mut self) {
-+        if self.realtime_conversation.dictation {
++        if self.realtime_conversation.dictation || self.realtime_conversation.speaker_muted {
 +            return;
 +        }
          let acknowledged = self
              .realtime_conversation
              .interruption_acknowledged_until
-@@ -253,6 +257,12 @@ impl ChatWidget {
+@@ -253,6 +273,12 @@ impl ChatWidget {
  
          let activity = if self.realtime_conversation.phase == RealtimeConversationPhase::Starting {
              "connecting"
 +        } else if self.realtime_conversation.dictation {
 +            if self.realtime_conversation.microphone_muted {
-+                "dictation paused"
++                "paused"
 +            } else {
-+                "dictating"
++                "recording"
 +            }
          } else if self.realtime_conversation.microphone_muted {
              "muted"
          } else if self
+@@ -273,6 +299,9 @@ impl ChatWidget {
+         };
+         self.bottom_pane.set_voice_strip(Some(VoiceStripState {
+             mute_hint: self.chat_keymap.voice_mute_hint(),
++            stop_hint: self.chat_keymap.voice_toggle_hint(),
++            dictation: self.realtime_conversation.dictation,
++            speaker_muted: self.realtime_conversation.speaker_muted,
+             phase: if active {
+                 VoiceStripPhase::Active
+             } else {
 diff --git a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs b/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
-index 7a3b2a0..b7dcc22 100644
+index 7a3b2a0..8f702bf 100644
 --- a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
-@@ -29,6 +29,41 @@ fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question:
+@@ -29,6 +29,133 @@ fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question:
      );
  }
  
@@ -612,28 +1247,38 @@ index 7a3b2a0..b7dcc22 100644
 +    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
 +    activate_voice(&mut chat);
 +    chat.realtime_conversation.dictation = true;
-+    chat.bottom_pane.append_dictation("Existing draft");
++    chat.bottom_pane.append_dictation("Existing draft", true);
 +
 +    chat.on_realtime_transcript_delta("user".into(), "first".into());
-+    chat.on_realtime_transcript_done("user".into(), "first fragment".into());
-+    chat.on_realtime_transcript_done("assistant".into(), "Uh-huh".into());
-+    assert_eq!(chat.bottom_pane.composer_text(), "Existing draft");
-+
-+    chat.realtime_conversation.microphone_muted = true;
-+    chat.flush_realtime_dictation();
++    assert_eq!(chat.bottom_pane.composer_text(), "Existing draft first");
++    chat.on_realtime_transcript_delta("user".into(), " part".into());
 +    assert_eq!(
 +        chat.bottom_pane.composer_text(),
-+        "Existing draft first fragment"
++        "Existing draft first part"
++    );
++    chat.on_realtime_transcript_done("assistant".into(), "Uh-huh".into());
++    chat.realtime_conversation.microphone_muted = true;
++    assert_eq!(
++        chat.bottom_pane.composer_text(),
++        "Existing draft first part"
 +    );
 +
 +    chat.realtime_conversation.microphone_muted = false;
++    chat.realtime_conversation.dictation_new_segment = true;
 +    chat.on_realtime_transcript_delta("user".into(), "second".into());
-+    chat.realtime_conversation.microphone_muted = true;
-+    chat.flush_realtime_dictation();
++    assert_eq!(
++        chat.bottom_pane.composer_text(),
++        "Existing draft first part second"
++    );
++    chat.on_realtime_transcript_done("user".into(), "first part.".into());
++    assert_eq!(
++        chat.bottom_pane.composer_text(),
++        "Existing draft first part second"
++    );
 +    chat.on_realtime_transcript_done("user".into(), "second fragment".into());
 +    assert_eq!(
 +        chat.bottom_pane.composer_text(),
-+        "Existing draft first fragment second fragment"
++        "Existing draft first part second fragment"
 +    );
 +    assert!(ops.try_recv().is_err());
 +    assert!(
@@ -642,9 +1287,107 @@ index 7a3b2a0..b7dcc22 100644
 +    );
 +}
 +
++#[tokio::test]
++async fn sending_dictation_keeps_recording_without_repeating_the_sent_prefix() {
++    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
++    let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
++    activate_voice(&mut chat);
++    chat.realtime_conversation.dictation = true;
++
++    chat.on_realtime_transcript_delta("user".into(), "First message".into());
++    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
++    assert!(!chat.realtime_conversation.microphone_muted);
++    assert_eq!(chat.bottom_pane.composer_text(), "");
++    assert!(ops.try_recv().is_ok());
++
++    chat.on_realtime_transcript_delta("user".into(), " second".into());
++    assert_eq!(chat.bottom_pane.composer_text(), "second");
++    chat.on_realtime_transcript_done("user".into(), "First message second phrase.".into());
++    assert_eq!(chat.bottom_pane.composer_text(), "second phrase.");
++    assert!(ops.try_recv().is_err());
++}
++
++#[tokio::test]
++async fn dictation_keeps_showing_live_words_after_two_sends() {
++    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
++    let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
++    let thread_id = activate_voice(&mut chat);
++    chat.realtime_conversation.dictation = true;
++
++    let first = "Первое слово ".repeat(20).trim_end().to_string();
++    let second = format!(" {}", "Второе слово ".repeat(22).trim_end());
++    for (fragment, sent_immediately) in [(&first, true), (&second, false)] {
++        chat.on_realtime_transcript_delta("user".into(), fragment.clone());
++        assert_eq!(chat.bottom_pane.composer_text(), fragment.trim_start());
++        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
++        assert_eq!(ops.try_recv().is_ok(), sent_immediately);
++        assert_eq!(chat.bottom_pane.composer_text(), "");
++    }
++    assert!(chat.input_queue.has_queued_follow_up_messages());
++
++    let third = "дальше идёт текст";
++    chat.on_realtime_transcript_delta("user".into(), format!(" {third}"));
++    assert_eq!(chat.bottom_pane.composer_text(), third);
++    finish_turn(&mut chat, thread_id, "first", vec![], TurnStatus::Completed);
++    assert!(!chat.input_queue.has_queued_follow_up_messages());
++    chat.on_realtime_transcript_done("user".into(), format!("{first}{second} {third}."));
++    assert_eq!(chat.bottom_pane.composer_text(), format!("{third}."));
++}
++
++#[tokio::test]
++async fn muted_voice_delivers_the_answer_in_chat_without_speech() {
++    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
++    let thread_id = activate_voice(&mut chat);
++    chat.toggle_realtime_agent_speaker();
++    assert!(chat.realtime_conversation.speaker_muted);
++    assert!(!chat.realtime_conversation.microphone_muted);
++    let turn_id = "voice-turn";
++    let delegation =
++        user_item("<realtime_delegation><input>my question</input></realtime_delegation>");
++    start_item(&mut chat, thread_id, turn_id, delegation.clone());
++    complete_item(&mut chat, thread_id, turn_id, delegation);
++    let answer = agent_item(
++        "voice-answer",
++        "Answer in the chat",
++        Some(MessagePhase::FinalAnswer),
++    );
++    start_item(&mut chat, thread_id, turn_id, answer.clone());
++    complete_item(&mut chat, thread_id, turn_id, answer.clone());
++    finish_turn(
++        &mut chat,
++        thread_id,
++        turn_id,
++        vec![answer],
++        TurnStatus::Completed,
++    );
++    assert!(ops.try_recv().is_err());
++    assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
++        matches!(event, AppEvent::InsertHistoryCell(cell) if cell.transcript_lines(80).iter().any(|line| line.to_string().contains("Answer in the chat")))
++    }));
++    chat.toggle_realtime_agent_speaker();
++    assert!(!chat.realtime_conversation.speaker_muted);
++    assert!(chat.realtime_conversation_is_running());
++}
++
  #[tokio::test]
  async fn typed_turn_remains_a_normal_text_response_while_voice_is_active() {
      let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+diff --git a/codex-rs/tui/src/keymap.rs b/codex-rs/tui/src/keymap.rs
+index 499a5ca..4ee15e0 100644
+--- a/codex-rs/tui/src/keymap.rs
++++ b/codex-rs/tui/src/keymap.rs
+@@ -183,6 +183,11 @@ pub(crate) struct ChatKeymap {
+ }
+ 
+ impl ChatKeymap {
++    pub(crate) fn voice_toggle_hint(&self) -> Option<ShortcutHint> {
++        let action = keymap_action_id("chat", "toggle_voice")?;
++        self.chord_hints.primary_hint(action, &self.toggle_voice)
++    }
++
+     pub(crate) fn voice_mute_hint(&self) -> Option<ShortcutHint> {
+         let action = keymap_action_id("chat", "toggle_voice_mute")?;
+         self.chord_hints
 diff --git a/codex-rs/tui/src/realtime_call.rs b/codex-rs/tui/src/realtime_call.rs
 index 37bfbee..e7fb34b 100644
 --- a/codex-rs/tui/src/realtime_call.rs
