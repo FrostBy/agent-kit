@@ -1,10 +1,11 @@
 diff --git a/codex-rs/tui/src/app/tests/permission_selection_tests.rs b/codex-rs/tui/src/app/tests/permission_selection_tests.rs
+index 725ee66..197848b 100644
 --- a/codex-rs/tui/src/app/tests/permission_selection_tests.rs
 +++ b/codex-rs/tui/src/app/tests/permission_selection_tests.rs
 @@ -3,6 +3,83 @@
  use super::*;
  use pretty_assertions::assert_eq;
-
+ 
 +#[tokio::test]
 +async fn shift_tab_full_access_reaches_app_server() -> Result<()> {
 +    boxed_future!(async {
@@ -86,9 +87,10 @@ diff --git a/codex-rs/tui/src/app/tests/permission_selection_tests.rs b/codex-rs
  async fn builtin_permission_selection_adopts_server_settings() -> Result<()> {
      let (mut app, mut events, _ops) = make_test_app_with_channels().await;
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 44ba6ca..fdb1a1a 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -792,6 +792,7 @@ pub(crate) struct ChatWidget {
+@@ -796,6 +796,7 @@ pub(crate) struct ChatWidget {
      status_line_workspace_messages_disabled: bool,
      // Cached command-backed status-line output and refresh state.
      status_line_command: status_line_command::StatusLineCommandState,
@@ -97,9 +99,10 @@ diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
      thread_usage: thread_usage::ThreadUsageState,
      // Current thread-goal status shown in the status line when plan mode is inactive.
 diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index 8135a5e..e8674d7 100644
 --- a/codex-rs/tui/src/chatwidget/constructor.rs
 +++ b/codex-rs/tui/src/chatwidget/constructor.rs
-@@ -290,6 +290,7 @@ impl ChatWidget {
+@@ -298,6 +298,7 @@ impl ChatWidget {
              status_line_workspace_headline_last_requested_at: None,
              status_line_workspace_messages_disabled: false,
              status_line_command: status_line_command::StatusLineCommandState::default(),
@@ -108,10 +111,11 @@ diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatw
              current_goal_status_indicator: None,
              current_goal_status: None,
 diff --git a/codex-rs/tui/src/chatwidget/interaction.rs b/codex-rs/tui/src/chatwidget/interaction.rs
+index db5d2d8..dfca5f0 100644
 --- a/codex-rs/tui/src/chatwidget/interaction.rs
 +++ b/codex-rs/tui/src/chatwidget/interaction.rs
-@@ -290,17 +290,18 @@ impl ChatWidget {
-
+@@ -333,17 +333,18 @@ impl ChatWidget {
+ 
          match key_event {
              KeyEvent {
 -                code: KeyCode::BackTab,
@@ -134,22 +138,29 @@ diff --git a/codex-rs/tui/src/chatwidget/interaction.rs b/codex-rs/tui/src/chatw
              }
              _ => {
 diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidget/settings.rs
+index 0ad24b0..19fd57a 100644
 --- a/codex-rs/tui/src/chatwidget/settings.rs
 +++ b/codex-rs/tui/src/chatwidget/settings.rs
-@@ -696,6 +696,117 @@ impl ChatWidget {
+@@ -731,6 +731,126 @@ impl ChatWidget {
          self.update_collaboration_mode_indicator();
      }
-
+ 
 +    pub(super) fn status_line_mode(&self) -> &'static str {
 +        if let Some(mode) = self.pending_interaction_mode {
-+            return if mode == ModeKind::Plan { "plan" } else { "auto" };
++            return if mode == ModeKind::Plan {
++                "plan"
++            } else {
++                "auto"
++            };
 +        }
 +        if self.active_mode_kind() == ModeKind::Plan {
 +            "plan"
 +        } else {
 +            let profile = self.config.permissions.permission_profile();
 +            if self.config.permissions.approval_policy.value() == AskForApproval::Never.to_core()
-+                && profile.file_system_sandbox_policy().has_full_disk_write_access()
++                && profile
++                    .file_system_sandbox_policy()
++                    .has_full_disk_write_access()
 +                && profile.network_sandbox_policy().is_enabled()
 +            {
 +                "auto"
@@ -170,7 +181,9 @@ diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidg
 +
 +    /// User shortcut: Auto <-> Plan, both with Full Access.
 +    pub(super) fn cycle_interaction_mode(&mut self) {
-+        let current = self.pending_interaction_mode.unwrap_or_else(|| self.active_mode_kind());
++        let current = self
++            .pending_interaction_mode
++            .unwrap_or_else(|| self.active_mode_kind());
 +        let target = if current == ModeKind::Plan {
 +            ModeKind::Default
 +        } else {
@@ -180,7 +193,8 @@ diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidg
 +    }
 +
 +    pub(super) fn apply_interaction_mode(&mut self, target: ModeKind) {
-+        let Some(mut mask) = collaboration_modes::mask_for_kind(self.model_catalog.as_ref(), target)
++        let Some(mut mask) =
++            collaboration_modes::mask_for_kind(self.model_catalog.as_ref(), target)
 +        else {
 +            return;
 +        };
@@ -255,6 +269,7 @@ diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidg
      pub(super) fn cycle_collaboration_mode(&mut self) {
          if !self.collaboration_modes_enabled() {
 diff --git a/codex-rs/tui/src/chatwidget/status_line_command.rs b/codex-rs/tui/src/chatwidget/status_line_command.rs
+index 344dcc4..e46a0d5 100644
 --- a/codex-rs/tui/src/chatwidget/status_line_command.rs
 +++ b/codex-rs/tui/src/chatwidget/status_line_command.rs
 @@ -39,6 +39,7 @@ struct StatusLineCommandPayload<'a> {
@@ -265,7 +280,7 @@ diff --git a/codex-rs/tui/src/chatwidget/status_line_command.rs b/codex-rs/tui/s
      cost: CostPayload,
      columns: u16,
      rows: u16,
-@@ -467,6 +468,7 @@ impl ChatWidget {
+@@ -479,6 +480,7 @@ impl ChatWidget {
                      number: pr.number,
                      url: pr.url.clone(),
                  }),
@@ -274,12 +289,13 @@ diff --git a/codex-rs/tui/src/chatwidget/status_line_command.rs b/codex-rs/tui/s
              cost: CostPayload {
                  estimated_thread_cost_usd_micros: estimated_usage
 diff --git a/codex-rs/tui/src/chatwidget/status_line_command_tests.rs b/codex-rs/tui/src/chatwidget/status_line_command_tests.rs
+index 1f6d90e..ed1759f 100644
 --- a/codex-rs/tui/src/chatwidget/status_line_command_tests.rs
 +++ b/codex-rs/tui/src/chatwidget/status_line_command_tests.rs
-@@ -57,6 +57,105 @@ async fn windows_command_timeout_is_bounded() {
+@@ -57,6 +57,122 @@ async fn windows_command_timeout_is_bounded() {
      assert!(started.elapsed() < Duration::from_secs(2));
  }
-
+ 
 +#[tokio::test]
 +async fn shift_tab_updates_interaction_mode_payload() {
 +    for key in [
@@ -311,9 +327,10 @@ diff --git a/codex-rs/tui/src/chatwidget/status_line_command_tests.rs b/codex-rs
 +                &PermissionProfile::Disabled
 +            );
 +        }
-+        assert!(!std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
-+            event, AppEvent::OpenFullAccessConfirmation { .. }
-+        )));
++        assert!(
++            !std::iter::from_fn(|| events.try_recv().ok())
++                .any(|event| matches!(event, AppEvent::OpenFullAccessConfirmation { .. }))
++        );
 +    }
 +}
 +
@@ -351,15 +368,23 @@ diff --git a/codex-rs/tui/src/chatwidget/status_line_command_tests.rs b/codex-rs
 +
 +    let (mut chat, _sender, mut events, _operations) =
 +        crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
-+    chat.config.permissions.set_permission_profile(PermissionProfile::workspace_write()).unwrap();
++    chat.config
++        .permissions
++        .set_permission_profile(PermissionProfile::workspace_write())
++        .unwrap();
 +    chat.cycle_interaction_mode();
 +    chat.cycle_interaction_mode();
 +    let mut applied = false;
 +    while let Ok(event) = events.try_recv() {
 +        match event {
 +            AppEvent::UpdateAskForApprovalPolicy(policy) => chat.set_approval_policy(policy),
-+            AppEvent::CodexOp(AppCommand::OverrideTurnContext { permission_profile: Some(profile), active_permission_profile, .. }) => {
-+                chat.set_permission_profile_with_active_profile(profile, active_permission_profile).unwrap();
++            AppEvent::CodexOp(AppCommand::OverrideTurnContext {
++                permission_profile: Some(profile),
++                active_permission_profile,
++                ..
++            }) => {
++                chat.set_permission_profile_with_active_profile(profile, active_permission_profile)
++                    .unwrap();
 +                applied = true;
 +            }
 +            _ => {}
@@ -367,15 +392,23 @@ diff --git a/codex-rs/tui/src/chatwidget/status_line_command_tests.rs b/codex-rs
 +    }
 +    assert!(applied);
 +    chat.set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
-+        PermissionProfile::Managed { file_system: ManagedFileSystemPermissions::Unrestricted, network: NetworkSandboxPolicy::Enabled },
-+    )).unwrap();
++        PermissionProfile::Managed {
++            file_system: ManagedFileSystemPermissions::Unrestricted,
++            network: NetworkSandboxPolicy::Enabled,
++        },
++    ))
++    .unwrap();
 +    assert_eq!(chat.status_line_mode(), "auto");
 +    chat.set_approval_policy(AskForApproval::OnRequest);
 +    assert_eq!(chat.status_line_mode(), "default");
 +    chat.set_approval_policy(AskForApproval::Never);
 +    chat.set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
-+        PermissionProfile::Managed { file_system: ManagedFileSystemPermissions::Unrestricted, network: NetworkSandboxPolicy::Restricted },
-+    )).unwrap();
++        PermissionProfile::Managed {
++            file_system: ManagedFileSystemPermissions::Unrestricted,
++            network: NetworkSandboxPolicy::Restricted,
++        },
++    ))
++    .unwrap();
 +    assert_eq!(chat.status_line_mode(), "default");
 +}
 +
@@ -383,12 +416,13 @@ diff --git a/codex-rs/tui/src/chatwidget/status_line_command_tests.rs b/codex-rs
  async fn payload_keeps_context_usage_separate_from_session_usage() {
      let (mut chat, _sender, _events, _operations) =
 diff --git a/codex-rs/tui/src/chatwidget/tests/app_server.rs b/codex-rs/tui/src/chatwidget/tests/app_server.rs
+index f10acfc..7b649ee 100644
 --- a/codex-rs/tui/src/chatwidget/tests/app_server.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/app_server.rs
-@@ -44,6 +44,77 @@ fn thread_settings_for_test(
+@@ -45,6 +45,80 @@ fn thread_settings_for_test(
      }
  }
-
+ 
 +#[tokio::test]
 +async fn shift_tab_full_access_survives_thread_settings_updated() {
 +    for reviewer in [ApprovalsReviewer::User, ApprovalsReviewer::AutoReview] {
@@ -417,7 +451,8 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/app_server.rs b/codex-rs/tui/src/
 +            chat.handle_key_event(KeyCode::BackTab.into());
 +            let updates: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
 +                .filter(|event| {
-+                    matches!(event,
++                    matches!(
++                        event,
 +                        AppEvent::SubmitThreadOp { .. } | AppEvent::SelectPermissionProfile(_)
 +                    )
 +                })
@@ -425,15 +460,17 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/app_server.rs b/codex-rs/tui/src/
 +            assert_eq!(updates.len(), 1);
 +            let AppEvent::SubmitThreadOp {
 +                thread_id: sent_thread_id,
-+                op: AppCommand::OverrideTurnContext {
-+                    approval_policy: Some(approval),
-+                    approvals_reviewer: Some(reviewer),
-+                    permission_profile: Some(profile),
-+                    active_permission_profile: Some(active_profile),
-+                    collaboration_mode: Some(mode),
-+                    ..
-+                },
-+            } = &updates[0] else {
++                op:
++                    AppCommand::OverrideTurnContext {
++                        approval_policy: Some(approval),
++                        approvals_reviewer: Some(reviewer),
++                        permission_profile: Some(profile),
++                        active_permission_profile: Some(active_profile),
++                        collaboration_mode: Some(mode),
++                        ..
++                    },
++            } = &updates[0]
++            else {
 +                panic!("expected a combined permissions and collaboration update");
 +            };
 +            assert_eq!(*sent_thread_id, thread_id);
@@ -464,11 +501,12 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/app_server.rs b/codex-rs/tui/src/
      crate::session_state::ThreadSessionState {
          daybreak_enabled: false,
 diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
+index a87c0ed..ba3f08c 100644
 --- a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
-@@ -1320,22 +1320,159 @@ async fn enter_submits_when_plan_stream_is_not_active() {
+@@ -1316,22 +1316,175 @@ async fn enter_submits_when_plan_stream_is_not_active() {
  }
-
+ 
  #[tokio::test]
 -async fn collab_mode_shift_tab_cycles_only_when_idle() {
 -    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -544,19 +582,25 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/c
 +        }
 +    }
 +}
-
+ 
 -    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
 -    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
 -    assert_eq!(chat.current_collaboration_mode(), &initial);
 +#[tokio::test]
 +async fn shift_tab_defers_only_the_latest_choice_until_turn_finishes() {
 +    for completed in [false, true] {
-+        for key in [KeyEvent::from(KeyCode::BackTab), KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)] {
++        for key in [
++            KeyEvent::from(KeyCode::BackTab),
++            KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
++        ] {
 +            let (mut chat, mut events, mut operations) = make_chatwidget_manual(None).await;
 +            chat.thread_id = Some(ThreadId::new());
-+            chat.config.permissions.set_permission_profile_from_session_snapshot(
-+                PermissionProfileSnapshot::legacy(PermissionProfile::workspace_write()),
-+            ).unwrap();
++            chat.config
++                .permissions
++                .set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
++                    PermissionProfile::workspace_write(),
++                ))
++                .unwrap();
 +            let approval = chat.config.permissions.approval_policy.value();
 +            let profile = chat.config.permissions.permission_profile().clone();
 +            let mode = chat.active_mode_kind();
@@ -570,18 +614,27 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/c
 +                assert_eq!(chat.config.permissions.approval_policy.value(), approval);
 +                assert_eq!(chat.config.permissions.permission_profile(), &profile);
 +                assert!(chat.bottom_pane.is_task_running());
-+                assert!(!std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(event,
-+                    AppEvent::SubmitThreadOp { .. } | AppEvent::CodexOp(_) | AppEvent::SelectPermissionProfile(_)
-+                )));
++                assert!(
++                    !std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
++                        event,
++                        AppEvent::SubmitThreadOp { .. }
++                            | AppEvent::CodexOp(_)
++                            | AppEvent::SelectPermissionProfile(_)
++                    ))
++                );
 +                assert!(operations.try_recv().is_err());
 +            }
-+            if completed { chat.on_task_complete(None, None, false); } else { chat.finalize_turn(); }
++            if completed {
++                chat.on_task_complete(None, None, false);
++            } else {
++                chat.finalize_turn();
++            }
 +            assert_eq!(chat.status_line_mode(), "plan");
 +            assert_eq!(chat.active_mode_kind(), ModeKind::Plan);
 +            assert_eq!(chat.pending_interaction_mode, None);
-+            let updates: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).filter(|event|
-+                matches!(event, AppEvent::SubmitThreadOp { .. })
-+            ).collect();
++            let updates: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
++                .filter(|event| matches!(event, AppEvent::SubmitThreadOp { .. }))
++                .collect();
 +            assert_eq!(updates.len(), 1);
 +            assert!(matches!(&updates[0], AppEvent::SubmitThreadOp {
 +                op: AppCommand::OverrideTurnContext { approval_policy: Some(AskForApproval::Never),
@@ -590,7 +643,7 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/c
 +        }
 +    }
 +}
-
+ 
 -    chat.on_task_started();
 -    let before = chat.active_collaboration_mode_kind();
 -    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
@@ -626,9 +679,10 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/c
 +                PermissionProfile::Disabled
 +            ));
 +        }
-+        assert!(!std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
-+            event, AppEvent::OpenFullAccessConfirmation { .. }
-+        )));
++        assert!(
++            !std::iter::from_fn(|| rx.try_recv().ok())
++                .any(|event| matches!(event, AppEvent::OpenFullAccessConfirmation { .. }))
++        );
 +        chat.on_task_started();
 +        for expected in ["auto", "plan", "auto"] {
 +            chat.handle_key_event(key);
@@ -638,9 +692,10 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/c
 +        }
 +    }
  }
-
+ 
  #[tokio::test]
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+index 1fda936..8460a1d 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
 @@ -48,6 +48,11 @@ impl ChatWidget {

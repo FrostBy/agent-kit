@@ -29,8 +29,7 @@ const DEFAULTS = {
 const CODEX_DEFAULTS = deepMerge(DEFAULTS, {
   maxLines: 4,
   lines: [
-    DEFAULTS.lines[0],
-    ['limits'],
+    ['model', 'effort', 'fast', '|', 'context', '|', 'limits', '|', 'activity', '|', 'todos', '|', 'subagents'],
     DEFAULTS.lines[2],
     DEFAULTS.lines[3],
   ],

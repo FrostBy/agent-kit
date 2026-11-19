@@ -1,7 +1,8 @@
 diff --git a/codex-rs/tui/src/history_cell/patches.rs b/codex-rs/tui/src/history_cell/patches.rs
+index ca4313b..9f1723b 100644
 --- a/codex-rs/tui/src/history_cell/patches.rs
 +++ b/codex-rs/tui/src/history_cell/patches.rs
-@@ -29,12 +29,11 @@
+@@ -45,12 +45,11 @@ impl HistoryCell for PatchHistoryCell {
      }
  
      fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
@@ -19,3 +20,26 @@ diff --git a/codex-rs/tui/src/history_cell/patches.rs b/codex-rs/tui/src/history
      }
  
      fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+diff --git a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__patches__tests__compact_patches_retain_full_changes_and_failure_details.snap b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__patches__tests__compact_patches_retain_full_changes_and_failure_details.snap
+index cd1de27..e8ed24f 100644
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__patches__tests__compact_patches_retain_full_changes_and_failure_details.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__patches__tests__compact_patches_retain_full_changes_and_failure_details.snap
+@@ -7,13 +7,18 @@ patch
+ Compact
+ • Edited 2 files (+6 -1)
+   └ existing.txt (+1 -1)
++    1  context
+     2 -before
+     2 +after
++    3  tail
+ 
+   └ new.txt (+5 -0)
+     1 +one
+     2 +two
+     3 +three
++    4 +four
++    5 +five
++
+ Full
+ • Edited 2 files (+6 -1)
+   └ existing.txt (+1 -1)

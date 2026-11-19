@@ -6,13 +6,15 @@ const os = require('node:os');
 const path = require('node:path');
 const { readManifest, selectFeatures, locations, options, checkRequirements, under, removeBestEffort } = require('../scripts/codex/common');
 const { assertWindows, install, restore, syncFooter, activeTarget, switchCurrent, copyVerified } = require('../scripts/codex/install');
-const { cleanupWork, checkCargoHomePath } = require('../scripts/codex/build');
+const { cleanupWork, checkCargoHomePath, matchWindowsMigrationChecksums } = require('../scripts/codex/build');
 const manifest = readManifest();
 const common = require('../scripts/codex/common');
 
 test('manifest selection follows manifest order and includes dependencies', () => {
   assert.deepEqual(selectFeatures(manifest, 'interaction-modes,full-diff,full-diff').map(f => f.id), ['statusline', 'full-diff', 'interaction-modes']);
-  assert.equal(selectFeatures(manifest).length, 6);
+  assert.deepEqual(selectFeatures(manifest).map(f => f.id), [
+    'statusline', 'full-diff', 'exec-timing', 'capacity-retry', 'interaction-modes', 'restricted-subagents', 'dictation',
+  ]);
   assert.deepEqual(selectFeatures(manifest, 'none'), []);
   assert.throws(() => selectFeatures(manifest, 'typo'), /Unknown feature/);
   const cyclic = { features: [{ id: 'a', dependencies: ['b'] }, { id: 'b', dependencies: ['a'] }] };
@@ -80,6 +82,24 @@ test('Windows Cargo home guard checks explicit/default paths and long-path regis
   assert.throws(() => checkCargoHomePath({ ...opts, env: {}, home: atLimit }), expected);
   checkCargoHomePath({ ...opts, env: { CARGO_HOME: atLimit + 'x' }, exec: () => 'LongPathsEnabled    REG_DWORD    0x1' });
   assert.throws(() => checkCargoHomePath({ ...opts, env: { CARGO_HOME: atLimit + 'x' }, exec: () => { throw Error('missing value'); } }), expected);
+});
+
+test('Windows builds preserve stock SQL migration checksums', t => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-migrations-'));
+  t.after(() => { under(state, os.tmpdir()); fs.rmSync(state, { recursive: true, force: true }); });
+  const dirs = ['migrations', 'logs_migrations', 'goals_migrations', 'memory_migrations', 'queue_migrations', 'thread_history_migrations'];
+  for (const dir of [...dirs, 'src']) {
+    fs.mkdirSync(path.join(state, dir));
+    fs.writeFileSync(path.join(state, dir, '0001_test.sql'), 'SELECT 1;\nSELECT 2;\r\n');
+  }
+  fs.writeFileSync(path.join(state, 'migrations', 'README.md'), 'Migrations\n');
+  matchWindowsMigrationChecksums(state);
+  matchWindowsMigrationChecksums(state);
+  for (const dir of dirs) {
+    assert.equal(fs.readFileSync(path.join(state, dir, '0001_test.sql'), 'utf8'), 'SELECT 1;\r\nSELECT 2;\r\n');
+  }
+  assert.equal(fs.readFileSync(path.join(state, 'src', '0001_test.sql'), 'utf8'), 'SELECT 1;\nSELECT 2;\r\n');
+  assert.equal(fs.readFileSync(path.join(state, 'migrations', 'README.md'), 'utf8'), 'Migrations\n');
 });
 
 test('install, reinstall, sync and restore use only a fake standalone junction tree', { skip: process.platform !== 'win32' }, t => {

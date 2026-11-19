@@ -24,6 +24,7 @@ const ELIGIBILITY_VERSION = 2;
 const digest = x => createHash('sha256').update(x).digest('hex');
 const other = kind => kind === 'claude' ? 'codex' : 'claude';
 const same = (a, b) => { const norm = x => process.platform === 'win32' ? path.resolve(x).toLowerCase() : path.resolve(x); return norm(a) === norm(b); };
+const within = (root, child) => { const rel = path.relative(root, child); return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel); };
 const jsonl = rows => rows.map(JSON.stringify).join('\n') + '\n';
 const scope = new AsyncLocalStorage();
 
@@ -41,6 +42,19 @@ async function samePath(a, b) {
   if (same(a, b)) return true;
   const plain = p => p.replace(/^\\\\\?\\/, '');
   return same(await canonical(plain(a)), await canonical(plain(b)));
+}
+
+async function claudeProject(input, config) {
+  const [root, transcript] = await Promise.all([canonical(config.claudeProjectsDir), canonical(input.transcript_path)]);
+  if (!within(root, transcript)) return config.cwd;
+  const [project, file, ...rest] = path.relative(root, transcript).split(path.sep);
+  if (rest.length || file !== `${input.session_id}.jsonl`) return config.cwd;
+  // Claude keeps the transcript in the launch project even when a tool changes cwd.
+  for (let dir = config.cwd; ; dir = path.dirname(dir)) {
+    const name = slug(dir);
+    if (process.platform === 'win32' ? name.toLowerCase() === project.toLowerCase() : name === project) return dir;
+    if (path.dirname(dir) === dir) return config.cwd;
+  }
 }
 
 async function withConfig(config, fn) {
@@ -395,14 +409,21 @@ async function append(file, text) {
   try { await handle.writeFile(text); await handle.sync(); } finally { await handle.close(); }
 }
 
-async function hook(kind, input, config = configuration(input.cwd), options = {}) {
+async function hook(kind, input, config, options = {}) {
   if (!['claude', 'codex'].includes(kind)) throw Error('Invalid client');
-  if (!input.session_id || !input.transcript_path || !input.cwd || !same(input.cwd, config.cwd)) return null;
+  if (!input.session_id || !input.transcript_path || !input.cwd) return null;
   if (!['SessionStart', 'UserPromptSubmit', 'Stop'].includes(input.hook_event_name)) return null;
   const env = options.env || process.env;
   options = { ...options, deadline: Date.now() + 27000 };
   // Environment and input exclusions are cheap and must override a cached interactive session.
   if (env.SESSION_SYNC_EXCLUDE || env.SESSION_SYNC_BROKER || input.agent_id || input.isSidechain || input.is_sidechain) return null;
+  if (!config) {
+    config = configuration(input.cwd, env);
+    if (kind === 'claude') {
+      const project = await claudeProject(input, config);
+      if (!same(project, config.cwd)) config = configuration(project, env);
+    }
+  } else if (!same(input.cwd, config.cwd)) return null;
   if (!await activated(config)) return null;
   const tokens = config.contextTokens ?? 50000;
   if (!Number.isFinite(tokens) || tokens < 512) throw Error('Sync context budget must be at least 512 tokens');
@@ -430,6 +451,19 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
         let read;
         try { read = await incremental(endpoint.file, endpoint.active ? endpoint.cursor : undefined); }
         catch (e) {
+          if (e.code === 'ENOENT' && kind === 'claude' && client === 'codex' && endpoint.mirror && endpoint.seeded
+            && endpoint.managed === 'app-server' && (!endpoint.createdBy || endpoint.createdBy === 'agent-kit-session-sync')) {
+            let compressed;
+            try { compressed = await fs.stat(await confined(`${endpoint.file}.zst`)); }
+            catch (error) { if (error.code !== 'ENOENT') throw error; }
+            if (compressed?.isFile()) {
+              // Keep the old thread and its checkpoint; only the paired mirror is replaced.
+              await write(path.join(config.stateDir, `${pair.id}.before-${endpoint.id}.json`), beforePair, true)
+                .catch(error => { if (error.code !== 'EEXIST') throw error; });
+              pair.codex = { id: randomUUID(), cwd: config.cwd, mirror: true, seeded: false, pending: [] };
+              return null;
+            }
+          }
           if (e.code === 'ENOENT' && ((endpoint.mirror && !endpoint.seeded) || (client === 'claude' && input.hook_event_name === 'SessionStart'))) return null;
           throw e;
         }
@@ -437,7 +471,8 @@ async function hook(kind, input, config = configuration(input.cwd), options = {}
         endpoint.meta = meta ? (client === 'claude' ? { sessionId: meta.sessionId, cwd: meta.cwd, version: meta.version }
           : { id: meta.id, cwd: meta.cwd, source: meta.source, thread_source: meta.thread_source, originator: meta.originator, cli_version: meta.cli_version, parent_thread_id: meta.parent_thread_id, session_sync: meta.session_sync }) : (read.reset ? null : endpoint.meta);
         if (endpoint.meta && (endpoint.meta.id ?? endpoint.meta.sessionId) !== endpoint.id) throw Error('Transcript/session ID mismatch');
-        if (endpoint.meta?.cwd && !await samePath(endpoint.meta.cwd, config.cwd)) throw Error('Transcript cwd mismatch');
+        if (endpoint.meta?.cwd && !await samePath(endpoint.meta.cwd, config.cwd)
+          && !(client === 'claude' && within(config.cwd, endpoint.meta.cwd))) throw Error('Transcript cwd mismatch');
         return read;
       }
       const decisions = await processCache.decisions(config.stateDir);

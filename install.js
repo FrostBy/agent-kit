@@ -174,7 +174,10 @@ async function main(args = process.argv.slice(2), {
     exec(process.execPath, [path.join(ROOT, 'scripts/codex/cli.js'), 'build', '--features', selection.features.map(f => f.id).join(',')], childOpts);
     exec(process.execPath, [path.join(ROOT, 'scripts/codex/cli.js'), 'install'], childOpts);
   }
-  if (selection.selected.some(item => item.id === 'broker')) log(`Agent broker: node "${path.join(ROOT, 'scripts/agents/broker.js')}" --agent codex|kimi --name NAME --state DIR --prompt FILE`);
+  if (selection.selected.some(item => item.id === 'broker')) {
+    require('./scripts/agents/mesh-hook').configure({ env, log });
+    log(`Agent broker: node "${path.join(ROOT, 'scripts/agents/broker.js')}" --agent codex|kimi|opencode|claude --name NAME --state DIR --prompt FILE`);
+  }
   if (selection.selected.some(item => item.id === 'sync')) require('./src/sync/install').configure({ env, log });
   if (selection.selected.some(item => item.id === 'voice')) await configureVoice({ env, yes: opts.yes, confirm: tty ? ask : undefined, log });
 }

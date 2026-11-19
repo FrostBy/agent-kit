@@ -1,0 +1,668 @@
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/realtime.rs b/codex-rs/app-server-protocol/src/protocol/v2/realtime.rs
+index 31a4b10..74376f2 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/realtime.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/realtime.rs
+@@ -290,6 +290,13 @@ pub enum ThreadRealtimeStartTransport {
+         /// realtime events data channel.
+         sdp: String,
+     },
++    /// Internal TUI transport for draft-only capture.
++    #[schemars(skip)]
++    #[ts(skip)]
++    Dictation {
++        #[serde(rename = "callId")]
++        call_id: String,
++    },
+     ExistingCall {
+         /// Identifier of a realtime call already created and negotiated by the client.
+         #[serde(rename = "callId")]
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index 6a69cc8..f91ab81 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -1288,7 +1288,10 @@ impl TurnRequestProcessor {
+     ) -> Result<Option<ThreadRealtimeStartResponse>, JSONRPCErrorError> {
+         let attaches_existing_call = matches!(
+             &params.transport,
+-            Some(ThreadRealtimeStartTransport::ExistingCall { .. })
++            Some(
++                ThreadRealtimeStartTransport::ExistingCall { .. }
++                    | ThreadRealtimeStartTransport::Dictation { .. }
++            )
+         );
+         if attaches_existing_call {
+             let unsupported_option = if params.include_startup_context == Some(true) {
+@@ -1363,9 +1366,17 @@ impl TurnRequestProcessor {
+                     ThreadRealtimeStartTransport::Webrtc { sdp } => {
+                         ConversationStartTransport::Webrtc { sdp }
+                     }
++                    ThreadRealtimeStartTransport::Dictation { call_id } => {
++                        ConversationStartTransport::ExistingCall {
++                            call_id,
++                            dictation: true,
++                            sideband_base_url,
++                        }
++                    }
+                     ThreadRealtimeStartTransport::ExistingCall { call_id, .. } => {
+                         ConversationStartTransport::ExistingCall {
+                             call_id,
++                            dictation: false,
+                             sideband_base_url,
+                         }
+                     }
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 9195883..9c54b58 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -144,10 +144,10 @@ struct RealtimeHandoffAdmission {
+ }
+ 
+ impl RealtimeHandoffAdmission {
+-    fn new() -> Self {
++    fn new(dictation: bool) -> Self {
+         Self {
+             gate: Semaphore::new(1),
+-            retired: AtomicBool::new(false),
++            retired: AtomicBool::new(dictation),
+         }
+     }
+ 
+@@ -568,6 +568,7 @@ impl RealtimeAttachmentControl {
+ }
+ 
+ struct RealtimeStart {
++    dictation: bool,
+     attachment_control: RealtimeAttachmentControl,
+     sideband: Option<codex_protocol::protocol::RealtimeSidebandTransport>,
+     api_provider: ApiProvider,
+@@ -692,6 +693,7 @@ impl RealtimeConversationManager {
+     ) -> CodexResult<RealtimeStartOutput> {
+         let session_id = start.session_config.session_id.clone();
+         let RealtimeStart {
++            dictation,
+             attachment_control,
+             sideband,
+             auth_context,
+@@ -733,7 +735,7 @@ impl RealtimeConversationManager {
+         let (transcript_tail_tx, transcript_tail_rx) = async_channel::bounded::<String>(1);
+ 
+         let realtime_active = Arc::new(AtomicBool::new(true));
+-        let route_handoffs = Arc::new(RealtimeHandoffAdmission::new());
++        let route_handoffs = Arc::new(RealtimeHandoffAdmission::new(dictation));
+         let stop_token = CancellationToken::new();
+         let handoff = RealtimeHandoffState {
+             output_tx: handoff_output_tx,
+@@ -903,8 +905,8 @@ impl RealtimeConversationManager {
+                 // Publication commits success; later cancellation must preserve
+                 // residency until the caller projects the Started event.
+                 state.conversation = Some(conversation);
+-                state.mode_instructions = Some(mode_instructions);
+-                state.context_active = true;
++                state.mode_instructions = (!dictation).then_some(mode_instructions);
++                state.context_active = !dictation;
+                 None
+             }
+         };
+@@ -1903,10 +1905,12 @@ async fn handle_start_inner(
+         transport,
+     } = prepared_start;
+     info!("starting realtime conversation");
+-    let (sdp, existing_call_id) = match transport {
+-        ConversationStartTransport::Websocket => (None, None),
+-        ConversationStartTransport::Webrtc { sdp } => (Some(sdp), None),
+-        ConversationStartTransport::ExistingCall { call_id, .. } => (None, Some(call_id)),
++    let (sdp, existing_call_id, dictation) = match transport {
++        ConversationStartTransport::Websocket => (None, None, false),
++        ConversationStartTransport::Webrtc { sdp } => (Some(sdp), None, false),
++        ConversationStartTransport::ExistingCall {
++            call_id, dictation, ..
++        } => (None, Some(call_id), dictation),
+     };
+     let mode_instructions = RealtimeModeInstructions {
+         start: realtime_start_instructions,
+@@ -1914,6 +1918,7 @@ async fn handle_start_inner(
+     };
+     let event_parser = session_config.event_parser;
+     let start = RealtimeStart {
++        dictation,
+         attachment_control,
+         sideband,
+         auth_context,
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index 7d0cd90..24cd9ca 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -272,7 +272,7 @@ async fn natural_close_finishes_before_successor_and_ignores_old_identity() {
+         input_task,
+         fanout_task: None,
+         realtime_active: identity,
+-        route_handoffs: Arc::new(RealtimeHandoffAdmission::new()),
++        route_handoffs: Arc::new(RealtimeHandoffAdmission::new(/*dictation*/ false)),
+         stop_token,
+     };
+     sess.conversation.state.lock().await.conversation = Some(connection(
+@@ -722,3 +722,17 @@ fn realtime_headers_keep_realtime_and_voice_session_ids_distinct() {
+         Some("voice_session_1")
+     );
+ }
++
++#[test]
++fn dictation_retires_core_handoffs_before_start() {
++    assert!(
++        super::RealtimeHandoffAdmission::new(true)
++            .retired
++            .load(Ordering::Acquire)
++    );
++    assert!(
++        !super::RealtimeHandoffAdmission::new(false)
++            .retired
++            .load(Ordering::Acquire)
++    );
++}
+diff --git a/codex-rs/core/tests/suite/realtime_attachment.rs b/codex-rs/core/tests/suite/realtime_attachment.rs
+index 444428e..d0a64cb 100644
+--- a/codex-rs/core/tests/suite/realtime_attachment.rs
++++ b/codex-rs/core/tests/suite/realtime_attachment.rs
+@@ -349,6 +349,7 @@ fn params(session: &str, url: &str) -> ConversationStartParams {
+         realtime_session_id: Some(session.to_owned()),
+         voice_session_id: None,
+         transport: Some(ConversationStartTransport::ExistingCall {
++            dictation: false,
+             call_id: format!("rtc_{session}"),
+             sideband_base_url: Some(url.to_owned()),
+         }),
+diff --git a/codex-rs/core/tests/suite/realtime_conversation.rs b/codex-rs/core/tests/suite/realtime_conversation.rs
+index 8cc7191..6984423 100644
+--- a/codex-rs/core/tests/suite/realtime_conversation.rs
++++ b/codex-rs/core/tests/suite/realtime_conversation.rs
+@@ -674,7 +674,7 @@ async fn conversation_start_defaults_to_v2_and_gpt_realtime_1_5() -> Result<()>
+ }
+ 
+ #[test_matrix(
+-    [ConversationStartTransport::Websocket, ConversationStartTransport::ExistingCall { call_id: "rtc_existing".to_string(), sideband_base_url: None }],
++    [ConversationStartTransport::Websocket, ConversationStartTransport::ExistingCall { dictation: false, call_id: "rtc_existing".to_string(), sideband_base_url: None }],
+     [None, Some(ThreadSource::User)]
+ )]
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+@@ -1265,12 +1265,14 @@ async fn conversation_webrtc_live_reconnects_sideband_after_unclean_disconnect(
+         },
+         SidebandReconnectTransport::ExistingCallConfiguredEndpoint => {
+             ConversationStartTransport::ExistingCall {
++                dictation: false,
+                 call_id: "rtc_reconnect".to_string(),
+                 sideband_base_url: None,
+             }
+         }
+         SidebandReconnectTransport::ExistingCallPerCallEndpoint => {
+             ConversationStartTransport::ExistingCall {
++                dictation: false,
+                 call_id: "rtc_reconnect".to_string(),
+                 sideband_base_url: Some(realtime_ws_base_url),
+             }
+@@ -1938,6 +1940,7 @@ async fn conversation_existing_call_stop_closes_only_observer_transport(
+             realtime_session_id: None,
+             voice_session_id: None,
+             transport: Some(ConversationStartTransport::ExistingCall {
++                dictation: false,
+                 call_id: "rtc_frontend_owned".to_string(),
+                 sideband_base_url: None,
+             }),
+diff --git a/codex-rs/core/tests/suite/realtime_sideband_endpoint.rs b/codex-rs/core/tests/suite/realtime_sideband_endpoint.rs
+index a2b4940..8728e0e 100644
+--- a/codex-rs/core/tests/suite/realtime_sideband_endpoint.rs
++++ b/codex-rs/core/tests/suite/realtime_sideband_endpoint.rs
+@@ -89,6 +89,7 @@ async fn existing_call_uses_selected_endpoint_and_runtime_auth(
+             realtime_session_id: None,
+             voice_session_id: None,
+             transport: Some(ConversationStartTransport::ExistingCall {
++                dictation: false,
+                 call_id: "rtc_existing".to_string(),
+                 sideband_base_url: match selection {
+                     EndpointSelection::Configured | EndpointSelection::Revoked => None,
+diff --git a/codex-rs/protocol/src/conversation_start_params_tests.rs b/codex-rs/protocol/src/conversation_start_params_tests.rs
+index d0ea1e0..45b1c23 100644
+--- a/codex-rs/protocol/src/conversation_start_params_tests.rs
++++ b/codex-rs/protocol/src/conversation_start_params_tests.rs
+@@ -36,6 +36,7 @@ fn realtime_start_debug_redacts_text_and_transport() {
+     };
+     for transport in [
+         ConversationStartTransport::ExistingCall {
++            dictation: false,
+             call_id: secret.to_owned(),
+             sideband_base_url: Some(format!("wss://example.test/?token={secret}")),
+         },
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 8d4b3fe..5cc1367 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -263,6 +263,7 @@ pub enum ConversationStartTransport {
+     },
+     ExistingCall {
+         call_id: String,
++        dictation: bool,
+         /// Endpoint selected by the embedding runtime for this call's sideband.
+         /// This is an in-process override, not a client-supplied API parameter.
+         /// `None` uses the configured endpoint or the default public API.
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index 9e73ea4..7fd36f7 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -1192,7 +1192,7 @@ impl App {
+             && self.keymap.chat.toggle_voice_mute.is_pressed(*key_event)
+         {
+             if !self.chat_widget.handle_startup_submission_key(*key_event) {
+-                self.control_voice(crate::app_event::VoiceControl::Mute);
++                self.control_voice(crate::app_event::VoiceControl::DictateOrMute);
+             }
+             return Ok(AppRunControl::Continue);
+         }
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index eeebcba..8abaf2a 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -2473,7 +2473,7 @@ impl App {
+                     let result = match result {
+                         Ok(call) => {
+                             owner.accept_realtime_call(call.answer_sdp);
+-                            app_server.thread_realtime_start(thread_id, call.call_id).await
++                            app_server.thread_realtime_start(thread_id, call.call_id, owner.realtime_dictation_active()).await
+                         }
+                         Err(error) => Err(error),
+                     };
+diff --git a/codex-rs/tui/src/app/input.rs b/codex-rs/tui/src/app/input.rs
+index 6968ef6..c6109c8 100644
+--- a/codex-rs/tui/src/app/input.rs
++++ b/codex-rs/tui/src/app/input.rs
+@@ -307,7 +307,8 @@ impl App {
+             return KeymapContextSet::browsing().with_voice_toggle(&self.keymap);
+         }
+         let voice_available = self.chat_widget.realtime_microphone_shortcut_available()
+-            || self.voice_owner_thread_id().is_some();
++            || self.voice_owner_thread_id().is_some()
++            || (!self.reconnect.offline && self.chat_widget.realtime_dictation_available());
+         let contexts = self.chat_widget.keymap_contexts();
+         let contexts = if self.chat_widget.no_modal_or_popup_active() {
+             let contexts = contexts
+diff --git a/codex-rs/tui/src/app/tests/realtime_handoff_e2e.rs b/codex-rs/tui/src/app/tests/realtime_handoff_e2e.rs
+index dbc2770..45d0d20 100644
+--- a/codex-rs/tui/src/app/tests/realtime_handoff_e2e.rs
++++ b/codex-rs/tui/src/app/tests/realtime_handoff_e2e.rs
+@@ -135,11 +135,12 @@ async fn delegated_core_events_keep_private_output_hidden_and_deliver_final_spee
+         &thread,
+         "v=offer\r\n".to_string(),
+         codex_protocol::protocol::RealtimeVoicesList::builtin().default_v1,
++        /*dictation*/ false,
+     )
+     .await?;
+     assert_eq!(String::from(call.answer_sdp), "v=answer\r\n");
+     app_server
+-        .thread_realtime_start(thread_id, call.call_id)
++        .thread_realtime_start(thread_id, call.call_id, /*dictation*/ false)
+         .await?;
+     // The sideband fixture sends its delegation after the first outbound request.
+     app_server
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+index abe4441..eea0ce3 100644
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -908,6 +908,7 @@ impl App {
+                 {
+                     return Ok(true);
+                 }
++                let dictation = self.chat_widget.realtime_dictation_active();
+                 let registration = self.chat_widget.begin_call_negotiation();
+                 let mut server = app_server.request_view();
+                 let config = self.config.clone();
+@@ -923,7 +924,8 @@ impl App {
+                         let thread = server
+                             .thread_read(thread_id, /*include_turns*/ false)
+                             .await?;
+-                        crate::realtime_call::create(&config, &thread, offer, voice).await
++                        crate::realtime_call::create(&config, &thread, offer, voice, dictation)
++                            .await
+                     };
+                     if let Ok(result) = futures::future::Abortable::new(create, registration).await
+                     {
+diff --git a/codex-rs/tui/src/app/voice_owner.rs b/codex-rs/tui/src/app/voice_owner.rs
+index 3b0af9f..37d8635 100644
+--- a/codex-rs/tui/src/app/voice_owner.rs
++++ b/codex-rs/tui/src/app/voice_owner.rs
+@@ -55,12 +55,17 @@ impl App {
+             match control {
+                 VoiceControl::Toggle => owner.toggle_realtime_conversation(),
+                 VoiceControl::Stop => owner.stop_realtime_conversation(),
+-                VoiceControl::Mute => owner.toggle_realtime_microphone(),
++                VoiceControl::Mute | VoiceControl::DictateOrMute => {
++                    owner.toggle_realtime_microphone();
++                }
+             }
+         } else if matches!(control, VoiceControl::Toggle) && !self.reconnect.offline {
+             // Preserve the ended owner's transcript before allowing another call.
+             self.retire_background_voice();
+             self.chat_widget.toggle_realtime_conversation();
++        } else if matches!(control, VoiceControl::DictateOrMute) && !self.reconnect.offline {
++            self.retire_background_voice();
++            self.chat_widget.start_realtime_dictation();
+         } else if matches!(control, VoiceControl::Mute) {
+             self.chat_widget.toggle_realtime_microphone();
+         }
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index f900fa5..18daba6 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -83,6 +83,7 @@ pub(crate) enum VoiceControl {
+     Toggle,
+     Stop,
+     Mute,
++    DictateOrMute,
+ }
+ 
+ /// Confirmed server lifecycle operations available from the agents dashboard.
+diff --git a/codex-rs/tui/src/app_server_session/realtime.rs b/codex-rs/tui/src/app_server_session/realtime.rs
+index 721dcdc..a84fb30 100644
+--- a/codex-rs/tui/src/app_server_session/realtime.rs
++++ b/codex-rs/tui/src/app_server_session/realtime.rs
+@@ -20,6 +20,7 @@ impl AppServerSession {
+         &mut self,
+         thread_id: ThreadId,
+         call_id: String,
++        dictation: bool,
+     ) -> Result<()> {
+         let request_id = self.next_request_id();
+         let _: ThreadRealtimeStartResponse = self
+@@ -45,9 +46,10 @@ impl AppServerSession {
+                     prompt: None,
+                     realtime_session_id: Some(thread_id.to_string()),
+                     voice_session_id: None,
+-                    transport: Some(ThreadRealtimeStartTransport::ExistingCall {
+-                        // The TUI owns the peer connection and has already negotiated this call.
+-                        call_id,
++                    transport: Some(if dictation {
++                        ThreadRealtimeStartTransport::Dictation { call_id }
++                    } else {
++                        ThreadRealtimeStartTransport::ExistingCall { call_id }
+                     }),
+                     version: Some(RealtimeConversationVersion::V3),
+                     voice: None,
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs b/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs
+index df7cec2..2ba6a86 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs
+@@ -12,6 +12,22 @@ use crate::bottom_pane::paste_burst::FlushResult;
+ use crate::bottom_pane::textarea::EditTarget;
+ 
+ impl ChatComposer {
++    pub(in crate::bottom_pane) fn append_dictation(&mut self, text: &str) {
++        self.flush_pending_input();
++        self.move_cursor_to_end();
++        let current = self.current_text();
++        let text = if current.is_empty() || current.ends_with(char::is_whitespace) {
++            text.to_string()
++        } else {
++            format!(" {text}")
++        };
++        self.insert_str_at_target(
++            self.draft.textarea.edit_target(),
++            &text,
++            ShellPrefixHandling::Literal,
++        );
++    }
++
+     pub(crate) fn insert_str(&mut self, text: &str) {
+         self.insert_str_at_target(
+             self.draft.textarea.edit_target(),
+diff --git a/codex-rs/tui/src/bottom_pane/mod.rs b/codex-rs/tui/src/bottom_pane/mod.rs
+index 226dbee..436b2ee 100644
+--- a/codex-rs/tui/src/bottom_pane/mod.rs
++++ b/codex-rs/tui/src/bottom_pane/mod.rs
+@@ -1249,6 +1249,11 @@ impl BottomPane {
+         self.request_redraw();
+     }
+ 
++    pub(crate) fn append_dictation(&mut self, text: &str) {
++        self.composer.append_dictation(text);
++        self.request_redraw();
++    }
++
+     /// Get the current composer text (for tests and programmatic checks).
+     pub(crate) fn composer_text(&self) -> String {
+         self.composer.current_text()
+diff --git a/codex-rs/tui/src/chatwidget/realtime.rs b/codex-rs/tui/src/chatwidget/realtime.rs
+index cdffddc..5377a59 100644
+--- a/codex-rs/tui/src/chatwidget/realtime.rs
++++ b/codex-rs/tui/src/chatwidget/realtime.rs
+@@ -142,6 +142,9 @@ pub(super) struct RealtimeConversationUiState {
+     session_lock: Option<session_lock::SessionLock>,
+     pub(super) phase: RealtimeConversationPhase,
+     recover_late_transcripts: bool,
++    dictation: bool,
++    dictation_buffer: String,
++    dictation_partial: String,
+     attempt_id: u64,
+     thread_id: Option<ThreadId>,
+     pub(super) handle: Option<RealtimeWebrtcSessionHandle>,
+@@ -262,6 +265,22 @@ impl ChatWidget {
+     }
+ 
+     pub(crate) fn toggle_realtime_conversation(&mut self) {
++        self.toggle_realtime_capture(false);
++    }
++
++    pub(crate) fn realtime_dictation_active(&self) -> bool {
++        self.realtime_conversation.dictation
++    }
++
++    pub(crate) fn realtime_dictation_available(&self) -> bool {
++        self.realtime_conversation_available_for_thread
++    }
++
++    pub(crate) fn start_realtime_dictation(&mut self) {
++        self.toggle_realtime_capture(true);
++    }
++
++    fn toggle_realtime_capture(&mut self, dictation: bool) {
+         if self.realtime_conversation.phase == RealtimeConversationPhase::Stopping {
+             self.realtime_conversation.startup_retry = StartupRetry::Used;
+             self.add_info_message(
+@@ -309,6 +328,7 @@ impl ChatWidget {
+ 
+         self.session_telemetry
+             .counter("codex.voice.session.start", /*inc*/ 1, &[]);
++        self.realtime_conversation.dictation = dictation;
+         self.start_realtime_conversation(thread_id);
+     }
+ 
+@@ -444,6 +464,9 @@ impl ChatWidget {
+             self.on_realtime_error(message, cause);
+             return;
+         }
++        if self.realtime_conversation.dictation {
++            offer.handle.set_speaker_suppressed(true);
++        }
+         self.realtime_conversation.handle = Some(offer.handle);
+         self.update_realtime_footer();
+         self.refresh_terminal_title();
+@@ -1315,6 +1338,17 @@ impl ChatWidget {
+     }
+ 
+     pub(super) fn on_realtime_transcript_delta(&mut self, role: String, delta: String) {
++        if self.realtime_conversation.dictation {
++            if role == "user"
++                && self.realtime_conversation.dictation_partial.len() + delta.len()
++                    <= MAX_TRANSCRIPT_BYTES
++            {
++                self.realtime_conversation
++                    .dictation_partial
++                    .push_str(&delta);
++            }
++            return;
++        }
+         if self.realtime_conversation.phase == RealtimeConversationPhase::Inactive
+             && !self.realtime_conversation.recover_late_transcripts
+         {
+@@ -1458,6 +1492,27 @@ impl ChatWidget {
+     }
+ 
+     pub(super) fn on_realtime_transcript_done(&mut self, role: String, mut text: String) {
++        if self.realtime_conversation.dictation {
++            if role == "user" && self.realtime_conversation.thread_id == self.thread_id() {
++                let partial = std::mem::take(&mut self.realtime_conversation.dictation_partial);
++                let text = if text.trim().is_empty() {
++                    partial.trim()
++                } else {
++                    text.trim()
++                };
++                if !text.is_empty() {
++                    let draft = &mut self.realtime_conversation.dictation_buffer;
++                    if !draft.is_empty() {
++                        draft.push(' ');
++                    }
++                    draft.push_str(text);
++                    if self.realtime_conversation.microphone_muted {
++                        self.flush_realtime_dictation();
++                    }
++                }
++            }
++            return;
++        }
+         if matches!(
+             self.realtime_conversation.phase,
+             RealtimeConversationPhase::Inactive | RealtimeConversationPhase::Stopping
+@@ -1687,7 +1742,19 @@ impl ChatWidget {
+         }
+     }
+ 
++    fn flush_realtime_dictation(&mut self) {
++        let text = std::mem::take(&mut self.realtime_conversation.dictation_buffer);
++        if !text.is_empty() {
++            self.bottom_pane.append_dictation(&text);
++        }
++    }
++
+     fn finish_realtime_partial_transcripts(&mut self) {
++        if self.realtime_conversation.dictation {
++            self.on_realtime_transcript_done("user".into(), String::new());
++            self.flush_realtime_dictation();
++            return;
++        }
+         if let Some((role, text)) = self.realtime_conversation.interleaved_transcript.take() {
+             self.realtime_conversation.interleaved_transcript_cell = None;
+             self.on_realtime_transcript_done(role, text);
+@@ -1785,6 +1852,7 @@ impl ChatWidget {
+         self.restore_all_undelivered_realtime_speech();
+         self.finish_realtime_partial_transcripts();
+         let muted = self.realtime_conversation.microphone_muted;
++        let dictation = self.realtime_conversation.dictation;
+         let thread_id = self.realtime_conversation.thread_id;
+         let retry_thread_id = if retry_after_stop || retry_after_early_close {
+             thread_id.filter(|id| Some(*id) == self.thread_id())
+@@ -1811,6 +1879,7 @@ impl ChatWidget {
+             // The old backend is closed. A late peer result belongs to its attempt ID.
+             self.realtime_conversation.startup_retry = StartupRetry::Used;
+             self.realtime_conversation.microphone_muted = muted;
++            self.realtime_conversation.dictation = dictation;
+             if retry_after_early_close {
+                 self.add_info_message(
+                     "Voice connection closed during startup. Retrying once.".into(),
+diff --git a/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs b/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
+index e299500..0bf52e8 100644
+--- a/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
++++ b/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
+@@ -29,6 +29,7 @@ impl ChatWidget {
+         self.realtime_conversation.microphone_level = 0;
+         self.realtime_conversation.microphone_intensity = 0;
+         if muted {
++            self.flush_realtime_dictation();
+             self.realtime_conversation.microphone_history = VoiceAmplitudeHistory::default();
+             for (microphone, _) in &mut self.realtime_conversation.audio_meter_history {
+                 *microphone = 0;
+@@ -60,6 +61,9 @@ impl ChatWidget {
+     }
+ 
+     pub(super) fn release_realtime_speaker(&mut self) {
++        if self.realtime_conversation.dictation {
++            return;
++        }
+         let acknowledged = self
+             .realtime_conversation
+             .interruption_acknowledged_until
+@@ -253,6 +257,12 @@ impl ChatWidget {
+ 
+         let activity = if self.realtime_conversation.phase == RealtimeConversationPhase::Starting {
+             "connecting"
++        } else if self.realtime_conversation.dictation {
++            if self.realtime_conversation.microphone_muted {
++                "dictation paused"
++            } else {
++                "dictating"
++            }
+         } else if self.realtime_conversation.microphone_muted {
+             "muted"
+         } else if self
+diff --git a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs b/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
+index 7a3b2a0..b7dcc22 100644
+--- a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
++++ b/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
+@@ -29,6 +29,41 @@ fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question:
+     );
+ }
+ 
++#[tokio::test]
++async fn dictated_fragments_append_to_a_single_draft_without_a_turn_or_speech() {
++    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
++    activate_voice(&mut chat);
++    chat.realtime_conversation.dictation = true;
++    chat.bottom_pane.append_dictation("Existing draft");
++
++    chat.on_realtime_transcript_delta("user".into(), "first".into());
++    chat.on_realtime_transcript_done("user".into(), "first fragment".into());
++    chat.on_realtime_transcript_done("assistant".into(), "Uh-huh".into());
++    assert_eq!(chat.bottom_pane.composer_text(), "Existing draft");
++
++    chat.realtime_conversation.microphone_muted = true;
++    chat.flush_realtime_dictation();
++    assert_eq!(
++        chat.bottom_pane.composer_text(),
++        "Existing draft first fragment"
++    );
++
++    chat.realtime_conversation.microphone_muted = false;
++    chat.on_realtime_transcript_delta("user".into(), "second".into());
++    chat.realtime_conversation.microphone_muted = true;
++    chat.flush_realtime_dictation();
++    chat.on_realtime_transcript_done("user".into(), "second fragment".into());
++    assert_eq!(
++        chat.bottom_pane.composer_text(),
++        "Existing draft first fragment second fragment"
++    );
++    assert!(ops.try_recv().is_err());
++    assert!(
++        !std::iter::from_fn(|| events.try_recv().ok())
++            .any(|event| matches!(event, AppEvent::InsertHistoryCell(_)))
++    );
++}
++
+ #[tokio::test]
+ async fn typed_turn_remains_a_normal_text_response_while_voice_is_active() {
+     let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+diff --git a/codex-rs/tui/src/realtime_call.rs b/codex-rs/tui/src/realtime_call.rs
+index 37bfbee..e7fb34b 100644
+--- a/codex-rs/tui/src/realtime_call.rs
++++ b/codex-rs/tui/src/realtime_call.rs
+@@ -35,6 +35,7 @@ pub(crate) async fn create(
+     thread: &Thread,
+     offer: String,
+     voice: RealtimeVoice,
++    dictation: bool,
+ ) -> Result<CreatedCall> {
+     ensure!(
+         config.realtime.session_type == RealtimeWsMode::Conversational,
+@@ -71,7 +72,7 @@ pub(crate) async fn create(
+             config.experimental_realtime_ws_backend_prompt.clone(),
+         ),
+         initial_items: Vec::new(),
+-        delegation_ack_filler: None,
++        delegation_ack_filler: dictation.then_some(false),
+         model: Some(
+             config
+                 .experimental_realtime_ws_model

@@ -108,16 +108,20 @@ function brokerStates(dir) {
   });
 }
 function hasLiveBroker(dir) {
-  return brokerStates(dir).some(state => state.unreadable || (!['done', 'error'].includes(state.status) && alive(state.pid)));
+  const since = cursor(dir).sessionStartedAt ?? 0;
+  return brokerStates(dir).some(state => state.unreadable || (!['done', 'error'].includes(state.status) && brokerActivity(state) >= since && alive(state.pid)));
+}
+function brokerActivity(state) {
+  return Math.max(Number(new Date(state.lastTurnAt || 0)) || 0,
+    Number(new Date(state.updatedAt || 0)) || 0, fs.statSync(`${state.base}.state.json`).mtimeMs);
 }
 function detectDeaths(dir, since = cursor(dir).sessionStartedAt ?? 0, observed = new Set()) {
   for (const state of brokerStates(dir)) {
     if (['done', 'error'].includes(state.status) || !state.pid) continue;
     const identity = `${state.base}:${state.pid}`;
-    if (alive(state.pid)) { observed.add(identity); continue; }
+    const activity = brokerActivity(state);
+    if (alive(state.pid)) { if (activity >= since) observed.add(identity); continue; }
     const file = `${state.base}.state.json`;
-    const activity = Math.max(Number(new Date(state.lastTurnAt || 0)) || 0,
-      Number(new Date(state.updatedAt || 0)) || 0, fs.statSync(file).mtimeMs);
     if (!observed.has(identity) && activity < since) {
       const { base, ...stored } = state;
       fs.writeFileSync(file, JSON.stringify({ ...stored, status: 'done' }), { mode: 0o600 });
@@ -128,13 +132,21 @@ function detectDeaths(dir, since = cursor(dir).sessionStartedAt ?? 0, observed =
     eventWriter(state.base, path.basename(state.base))('agent.exited', { reason: 'unexpected', pid: state.pid }, { summary: 'Broker process died unexpectedly' });
   }
 }
-async function nextEvent(dir, { timeoutMin = 120, pollMs = 250, signal, wakeOnly = false, sessionStartedAt } = {}) {
+async function nextEvent(dir, { timeoutMin = 120, pollMs = 250, signal, wakeOnly = false, keepAlive = false, sessionStartedAt } = {}) {
   if (!Number.isFinite(timeoutMin) || timeoutMin <= 0 || !Number.isFinite(pollMs) || pollMs <= 0) throw Error('Invalid events timeout/poll interval');
   const release = lock(dir), deadline = Date.now() + timeoutMin * 60000;
   try {
-    if (sessionStartedAt !== undefined) updateCursor(dir, seen => { seen.sessionStartedAt = sessionStartedAt; seen.liveBrokers = []; });
+    if (sessionStartedAt !== undefined || (wakeOnly && cursor(dir).sessionStartedAt === undefined)) {
+      updateCursor(dir, seen => {
+        seen.sessionStartedAt = sessionStartedAt ?? Date.now();
+        seen.liveBrokers = [];
+      });
+    }
     const previous = cursor(dir), since = sessionStartedAt ?? previous.sessionStartedAt ?? 0;
-    const observed = new Set(previous.liveBrokers || []);
+    const current = wakeOnly ? brokerStates(dir) : [];
+    const observed = new Set((previous.liveBrokers || []).filter(identity => current.some(state =>
+      identity === `${state.base}:${state.pid}` && brokerActivity(state) >= since)));
+    if (wakeOnly && observed.size !== (previous.liveBrokers || []).length) updateCursor(dir, seen => { seen.liveBrokers = [...observed]; });
     for (;;) {
       if (wakeOnly) {
         const count = observed.size;
@@ -143,13 +155,16 @@ async function nextEvent(dir, { timeoutMin = 120, pollMs = 250, signal, wakeOnly
       }
       else signal?.throwIfAborted();
       const seen = cursor(dir), candidates = [], retired = {};
+      const states = wakeOnly ? new Map(brokerStates(dir).map(state => [state.base, state])) : null;
       for (const file of eventFiles(dir)) {
         const events = readEvents(path.join(dir, file));
         const resolved = new Set(events.filter(e => e.type === 'request.resolved').map(e => e.requestId));
         const base = path.join(dir, file.slice(0, -'.events.jsonl'.length));
-        // A death recorded before this session, of a broker it never saw alive, is history, not news.
-        const stale = e => wakeOnly && e.type === 'agent.exited' && e.payload?.reason === 'unexpected' &&
-          Number(new Date(e.at)) < since && !observed.has(`${base}:${e.payload?.pid}`);
+        const state = states?.get(base);
+        const live = state && !['done', 'error'].includes(state.status) && alive(state.pid);
+        // A live/reused PID or inherited observation never makes historical results current.
+        const stale = e => wakeOnly && Number(new Date(e.at)) < since &&
+          !(['question', 'approval'].includes(e.type) && live && state.pendingRequests?.includes(e.requestId));
         const next = events.find(e => {
           if (!(e.seq > (seen[file] || 0) && !seen.delivered?.includes(e.id) && wakeTypes.has(e.type) &&
             (!wakeOnly || e.type !== 'agent.exited' || ['error', 'unexpected'].includes(e.payload?.reason) || e.payload?.status === 'error' || e.payload?.code > 0) &&
@@ -175,7 +190,7 @@ async function nextEvent(dir, { timeoutMin = 120, pollMs = 250, signal, wakeOnly
         return event;
       }
       if (Date.now() >= deadline) return null;
-      if (wakeOnly && !hasLiveBroker(dir)) return null;
+      if (wakeOnly && !keepAlive && !hasLiveBroker(dir)) return null;
       signal?.throwIfAborted();
       await sleep(Math.min(pollMs, deadline - Date.now()), undefined, { signal });
     }

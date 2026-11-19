@@ -84,12 +84,13 @@ test('answers cover every question and reject invalid question IDs/options', () 
 
 test('hook derives session scratchpad from transcript or cwd, skips subagents, and exits 2 only once per event', async t => {
   const tmp = fixture(t), input = { session_id: 'session-1', cwd: 'Z:\\project', hook_event_name: 'SessionStart', transcript_path: 'C:\\profile\\projects\\Z--project\\session-1.jsonl' };
-  const dir = scratchpad(input, tmp); assert.equal(dir, path.join(tmp, 'claude', 'Z--project', 'session-1', 'scratchpad'));
-  assert.equal(scratchpad({ ...input, transcript_path: undefined }, tmp), path.join(tmp, 'claude', 'z--project', 'session-1', 'scratchpad'));
+  const dir = scratchpad(input, tmp, {});
+  assert.equal(dir, scratchpad({ ...input, transcript_path: undefined }, tmp, {}));
+  assert.match(path.basename(path.dirname(path.dirname(dir))), /^[a-f0-9]{16}$/);
   assert.equal(scratchpad({ ...input, agent_id: 'sub' }, tmp), null);
   assert.throws(() => scratchpad({ ...input, session_id: '../escape' }, tmp), /session_id/);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'worker.state.json'), JSON.stringify({ status: 'running', pid: process.pid }));
+  fs.writeFileSync(path.join(dir, 'worker.state.json'), JSON.stringify({ status: 'running', pid: process.pid, pendingRequests: ['req'] }));
   eventWriter(path.join(dir, 'worker'), 'worker')('question', { questions: [{ id: 'q', question: 'Which?' }] }, { requestId: 'req', summary: 'Choose' });
   const env = { ...process.env, TEMP: tmp, TMP: tmp, TMPDIR: tmp, SESSION_SYNC_BROKER: '' };
   const result = spawnSync(process.execPath, [path.resolve(__dirname, '../scripts/agents/mesh-hook.js')], { input: JSON.stringify(input), env, encoding: 'utf8', timeout: 5000 });
@@ -103,25 +104,55 @@ test('hook derives session scratchpad from transcript or cwd, skips subagents, a
   assert.equal(await hook(input, { env: { SESSION_SYNC_BROKER: '1' }, tmp }), 0);
   fs.writeFileSync(path.join(dir, 'worker.state.json'), JSON.stringify({ status: 'done', pid: process.pid }));
   assert.equal(await hook(input, { env: {}, tmp, ...short, write() {} }), 0);
-  fs.writeFileSync(path.join(dir, 'worker.state.json'), JSON.stringify({ status: 'running', pid: process.pid }));
+  fs.writeFileSync(path.join(dir, 'worker.state.json'), JSON.stringify({ status: 'running', pid: process.pid, updatedAt: new Date(Date.now() + 1000).toISOString() }));
   const writes = []; assert.equal(await hook(input, { env: {}, tmp, ...short, write: text => writes.push(text) }), 2);
   assert.match(writes[0], /deadline.*Stop rearms/);
   eventWriter(path.join(dir, 'other'), 'other')('turn.completed', { status: 'completed' }, { summary: 'Second event' });
   assert.equal(await hook({ ...input, hook_event_name: 'Stop' }, { env: {}, tmp, ...short, write() {} }), 2);
 });
 
-test('hook exits immediately without live brokers, including an absent scratchpad', async t => {
+test('hook finds current hashed, legacy and custom Claude scratchpad roots', t => {
+  const tmp = fixture(t), input = { session_id: 'owner', cwd: 'Z:\\weknowgaming' };
+  assert.equal(scratchpad(input, tmp, {}), path.join(tmp, 'claude', 'd87291c2f693a0c9', 'owner', 'scratchpad'));
+  const desktop = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' };
+  const legacy = path.join(tmp, 'claude', 'z--weknowgaming', 'owner', 'scratchpad');
+  assert.equal(scratchpad(input, tmp, desktop), legacy);
+  assert.equal(scratchpad(input, tmp, { CLAUDE_CODE_HOST_SHORT_TEMP_DIRS: 'false' }), legacy);
+  fs.mkdirSync(legacy, { recursive: true });
+  assert.equal(scratchpad(input, tmp, {}), legacy);
+  const custom = path.join(tmp, 'custom');
+  assert.equal(scratchpad(input, tmp, { CLAUDE_CODE_TMPDIR: custom }), path.join(custom, 'claude', 'd87291c2f693a0c9', 'owner', 'scratchpad'));
+});
+
+test('Claude hook delivers turn completion while the persistent broker is still alive', async t => {
+  const tmp = fixture(t), input = { session_id: 'live-owner', cwd: 'Z:\\weknowgaming', hook_event_name: 'PostToolUse' };
+  const dir = scratchpad(input, tmp, {}), writes = [];
+  const broker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+  t.after(() => broker.kill());
+  fs.mkdirSync(dir, { recursive: true });
+  const base = path.join(dir, 'reviewer');
+  const waiting = hook(input, { env: {}, tmp, timeoutMin: 0.1, pollMs: 5, write: text => writes.push(text) });
+  setImmediate(() => {
+    fs.writeFileSync(`${base}.state.json`, JSON.stringify({ pid: broker.pid, status: 'idle', turns: 1 }));
+    eventWriter(base, 'reviewer')('turn.completed', { status: 'completed' }, { turnId: 'turn-1', summary: 'Review ready' });
+  });
+  assert.equal(await waiting, 2);
+  assert.match(writes[0], /reviewer turn.completed: Review ready/);
+  assert.match(writes[0], /reviewer\.out\.md/);
+  assert.equal(broker.exitCode, null);
+  assert.doesNotThrow(() => process.kill(broker.pid, 0));
+  assert.equal(await nextEvent(dir, short), null);
+});
+
+test('empty hook subscription is cancellable and times out without waking Claude', async t => {
   const tmp = fixture(t), input = { session_id: 'empty-session', cwd: tmp, hook_event_name: 'Stop' };
   const dir = scratchpad(input, tmp), signal = AbortSignal.abort();
   const options = { env: {}, tmp, signal, write() { assert.fail('No wake without a live broker'); } };
-  assert.equal(await hook(input, options), 0); assert(!fs.existsSync(dir));
-  fs.mkdirSync(dir, { recursive: true });
-  eventWriter(path.join(dir, 'worker'), 'worker')('turn.completed', { status: 'completed' });
+  await assert.rejects(hook(input, options), { name: 'AbortError' });
   for (const state of [{ status: 'done', pid: process.pid }, { status: 'error', pid: process.pid }, { status: 'running', pid: 0 }]) {
     fs.writeFileSync(path.join(dir, 'worker.state.json'), JSON.stringify(state));
-    assert.equal(await hook(input, options), 0);
+    assert.equal(await hook(input, { ...options, signal: undefined, ...short }), 0);
     assert(!fs.existsSync(path.join(dir, '.mesh-events.lock')));
-    assert(!fs.existsSync(path.join(dir, '.mesh-events.cursor.json')));
   }
 });
 
@@ -137,7 +168,7 @@ test('hook waits 235 minutes by default, leaving five minutes before its configu
   });
   assert.equal(await exported.exports.hook({ session_id: 'session', cwd: os.tmpdir(), hook_event_name: 'Stop' }, { env: {}, write() {} }), 2);
   assert.equal(waitOptions.timeoutMin, 235);
-  for (const event of ['SessionStart', 'Stop']) {
+  for (const event of ['SessionStart', 'PostToolUse', 'Stop']) {
     const groups = hookConfig().hooks[event];
     assert.equal(groups[0].hooks[0].timeout, 14400);
     assert.equal(groups[0].hooks[0].timeout - waitOptions.timeoutMin * 60, 300);
@@ -172,7 +203,7 @@ test('idle and normal exits stay in events without waking Claude; errors and une
   for (const reason of ['idle', 'exit', 'owner', 'error', 'unexpected']) {
     fs.writeFileSync(file, JSON.stringify({ pid: process.pid, status: 'idle' }));
     const writes = [];
-    const waiting = hook(input, { tmp, env: {}, timeoutMin: 1, pollMs: 5, write: text => writes.push(text) });
+    const waiting = hook(input, { tmp, env: {}, ...short, write: text => writes.push(text) });
     if (reason === 'unexpected') fs.writeFileSync(file, JSON.stringify({ pid: 999999999, status: 'running' }));
     else {
       emit('agent.exited', { reason, pid: process.pid, code: reason === 'error' ? 1 : 0 });
@@ -218,6 +249,93 @@ test('SessionStart quietly retires old dead brokers; a death after it wakes Stop
   assert.equal(await hook({ ...input, hook_event_name: 'Stop' }, options), 0);
 });
 
+test('first Stop subscription silently retires old dead-worker errors and completions', async t => {
+  const tmp = fixture(t), input = { session_id: 'hot-install', cwd: tmp, hook_event_name: 'Stop' };
+  const dir = scratchpad(input, tmp); fs.mkdirSync(dir, { recursive: true });
+  const old = new Date(Date.now() - 86400000).toISOString();
+  for (const [name, status] of [['s6', 'error'], ['s8', 'reconnecting']]) {
+    const base = path.join(dir, name);
+    fs.writeFileSync(`${base}.state.json`, JSON.stringify({ pid: 999999999, status, lastTurnAt: old }));
+    const events = ['error', 'error', 'turn.completed', 'question', 'agent.exited'].map((type, i) => ({
+      v: 1, id: `${name}:${i + 1}`, seq: i + 1, at: old, from: name, type,
+      requestId: type === 'question' ? 'old-request' : null,
+      payload: type === 'agent.exited' ? { reason: 'unexpected', pid: 999999999 } : {}, summary: 'Old notification'
+    }));
+    fs.writeFileSync(`${base}.events.jsonl`, events.map(e => JSON.stringify(e)).join('\n') + '\n');
+  }
+  fs.writeFileSync(path.join(dir, '.mesh-events.cursor.json'), JSON.stringify({ 's6.events.jsonl': 1 }));
+  assert.equal(await hook(input, { tmp, env: {}, ...short, write() { assert.fail('Historical notification'); } }), 0);
+  const seen = JSON.parse(fs.readFileSync(path.join(dir, '.mesh-events.cursor.json'), 'utf8'));
+  assert(seen.sessionStartedAt > new Date(old).getTime());
+  assert.equal(seen['s6.events.jsonl'], 5); assert.equal(seen['s8.events.jsonl'], 5);
+  const base = path.join(dir, 'current');
+  fs.writeFileSync(`${base}.state.json`, JSON.stringify({ pid: process.pid, status: 'idle' }));
+  eventWriter(base, 'current')('turn.completed', {}, { summary: 'Current result' });
+  const writes = [];
+  assert.equal(await hook(input, { tmp, env: {}, ...short, write: text => writes.push(text) }), 2);
+  assert.match(writes[0], /Current result/);
+});
+
+test('initial subscription preserves confirmed pending requests but skips old completed turns of live workers', async t => {
+  const tmp = fixture(t), input = { session_id: 'pending', cwd: tmp, hook_event_name: 'Stop' };
+  const dir = scratchpad(input, tmp); fs.mkdirSync(dir, { recursive: true });
+  const base = path.join(dir, 'live');
+  fs.writeFileSync(`${base}.state.json`, JSON.stringify({ pid: process.pid, status: 'running', pendingRequests: ['active-request'] }));
+  const old = new Date(Date.now() - 86400000).toISOString();
+  const events = ['question', 'turn.completed'].map((type, i) => ({
+    v: 1, id: `live:${i + 1}`, seq: i + 1, at: old, from: 'live', type, requestId: 'active-request', payload: {}, summary: type
+  }));
+  fs.writeFileSync(`${base}.events.jsonl`, events.map(e => JSON.stringify(e)).join('\n') + '\n');
+  const writes = [], options = { tmp, env: {}, ...short, write: text => writes.push(text) };
+  assert.equal(await hook(input, options), 2); assert.match(writes[0], /live question/);
+  assert.equal(await nextEvent(dir, { ...short, wakeOnly: true }), null); assert.equal(writes.length, 1);
+});
+
+test('inherited observations and existing PIDs cannot replay old reports or synthesize old failures', async t => {
+  const tmp = fixture(t), input = { session_id: 'old-observations', cwd: tmp, hook_event_name: 'Stop' };
+  const dir = scratchpad(input, tmp); fs.mkdirSync(dir, { recursive: true });
+  const old = new Date(Date.now() - 86400000), since = Date.now() - 1000, identities = [];
+  const names = ['cx-ping2', 'review-new', 'fix-upload-save', 'fix-saved', 'tech4358'];
+  for (const [i, name] of names.entries()) {
+    const base = path.join(dir, name), file = `${base}.state.json`;
+    const pid = i < 2 ? process.pid : 999999999;
+    fs.writeFileSync(file, JSON.stringify({ pid, status: i < 2 ? 'idle' : 'running', lastTurnAt: old.toISOString() }));
+    fs.utimesSync(file, old, old); identities.push(`${base}:${pid}`);
+    fs.writeFileSync(`${base}.events.jsonl`, ['error', 'turn.completed', 'agent.exited'].map((type, n) => JSON.stringify({
+      v: 1, id: `${name}:${n + 1}`, seq: n + 1, from: name, at: old.toISOString(), type,
+      payload: { reason: 'unexpected', code: 143, pid }, summary: 'Already handled'
+    })).join('\n') + '\n');
+  }
+  fs.writeFileSync(path.join(dir, '.mesh-events.cursor.json'), JSON.stringify({ sessionStartedAt: since, liveBrokers: identities }));
+  const listener = spawn(process.execPath, [path.resolve(__dirname, '../scripts/agents/mesh-hook.js')], {
+    env: { ...process.env, TEMP: tmp, TMP: tmp, TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, SESSION_SYNC_BROKER: '' },
+    windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']
+  });
+  t.after(() => listener.kill());
+  let stderr = ''; listener.stderr.on('data', chunk => { stderr += chunk; });
+  const exited = new Promise(resolve => listener.once('exit', resolve));
+  listener.stdin.end(JSON.stringify(input));
+  const deadline = Date.now() + 5000;
+  while (JSON.parse(fs.readFileSync(path.join(dir, '.mesh-events.cursor.json'), 'utf8'))['tech4358.events.jsonl'] !== 3) {
+    assert.equal(listener.exitCode, null, stderr); assert(Date.now() < deadline, 'Listener did not retire historical events');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(listener.exitCode, null); assert.equal(stderr, '');
+  const seen = JSON.parse(fs.readFileSync(path.join(dir, '.mesh-events.cursor.json'), 'utf8'));
+  assert.deepEqual(seen.liveBrokers, []);
+  for (const name of names) {
+    assert.equal(seen[`${name}.events.jsonl`], 3);
+    assert.equal(fs.readFileSync(path.join(dir, `${name}.events.jsonl`), 'utf8').trim().split('\n').length, 3);
+  }
+  const base = path.join(dir, 'current-review');
+  fs.writeFileSync(`${base}.state.json`, JSON.stringify({ pid: process.pid, status: 'idle' }));
+  eventWriter(base, 'current-review')('turn.completed', {}, { summary: 'New review ready' });
+  const timer = setTimeout(() => listener.kill(), 5000);
+  try { assert.equal(await exited, 2, stderr); } finally { clearTimeout(timer); }
+  assert.match(stderr, /current-review turn.completed: New review ready/);
+  assert.doesNotMatch(stderr, /Already handled|cx-ping2|tech4358/);
+});
+
 test('a broker observed alive before a waiter returns still wakes on death between hooks', async t => {
   const tmp = fixture(t), input = { session_id: 'between-hooks', cwd: tmp, hook_event_name: 'SessionStart' };
   const dir = scratchpad(input, tmp); fs.mkdirSync(dir, { recursive: true });
@@ -225,7 +343,7 @@ test('a broker observed alive before a waiter returns still wakes on death betwe
   t.after(() => child.kill());
   const file = path.join(dir, 'worker.state.json');
   fs.writeFileSync(file, JSON.stringify({ pid: child.pid, status: 'idle' }));
-  const old = new Date(Date.now() - 86400000); fs.utimesSync(file, old, old);
+  const fresh = new Date(Date.now() + 1000); fs.utimesSync(file, fresh, fresh);
   const options = { tmp, env: {}, ...short, write() {} };
   assert.equal(await hook(input, options), 2);
   const exited = new Promise(resolve => child.once('exit', resolve)); child.kill(); await exited;

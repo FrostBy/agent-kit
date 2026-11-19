@@ -14,6 +14,10 @@ Shared-daemon Codex CLI sessions can have `source=vscode` and an inherited `orig
 
 ## Context budget and delivery
 
+A Claude session launched in an umbrella directory keeps the same pair while moving between child repositories. The hook resolves the launch directory from the Claude transcript's project folder.
+
+If Codex compresses a managed mirror to `.jsonl.zst` and the plain transcript is gone, the next Claude hook creates a new Codex mirror from Claude's bounded current context and updates the pair. The old thread, compressed transcript and a checkpoint backup remain intact. Original Codex sessions are not replaced, and a missing transcript without a compressed copy still fails closed.
+
 Seeds and backlog replacements use the latest compact summary plus the bounded recent context; without compaction, omitted earlier history is labeled. The default budget is about 50k tokens (UTF-8 bytes / 4), configurable with `SESSION_SYNC_CONTEXT_TOKENS`; compaction or an oversized pending backlog replaces that backlog with current context.
 
 Hook delivery is separate from the seed budget: Claude has a [10,000-character cap](https://code.claude.com/docs/en/hooks#json-output), so sync conservatively uses 10,000 UTF-8 bytes. Codex's `additionalContextLimit` is approximate tokens (`ceil(UTF-8 bytes / 4)`): our 16000 means 64000 bytes, default 2500, 0 unlimited; no explicit maximum beyond `usize`. Snapshots and large events are sent in sequential acknowledged chunks, each marked at the start. Busy locks exit silently and expire after 30 seconds; unchanged checkpoints are not rewritten, event keys are bounded to 256, and denied decisions to 128 entries / seven days. CLI PID/start-time checks reuse eligibility across SessionStart; Windows uses local WSH/WMI for identity, falling back to full CIM if unavailable. Claude mirror versions use transcripts or a cached `--version` query; Codex writes its own metadata.

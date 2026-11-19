@@ -78,6 +78,29 @@ async function fixture(t) {
   return { root, env, config, id, file, input, registry, pair, append, archive };
 }
 
+test('Claude launched in an umbrella keeps the same mirror when changing repositories', async t => {
+  const f = await fixture(t), { config, id } = f;
+  const file = path.join(config.claudeProjectsDir, slug(config.cwd), `${id}.jsonl`);
+  const repoA = path.join(config.cwd, 'repo-a'), repoB = path.join(config.cwd, 'repo-b');
+  const options = { ...opts, env: f.env, connectCodex: config.connectCodex, versions: config.versions };
+  await fs.mkdir(repoA, { recursive: true }); await fs.mkdir(repoB);
+  await fs.writeFile(file, jsonl([c(id, 'Start at umbrella', { cwd: config.cwd })]));
+  const input = cwd => ({ ...f.input('claude', { id, file }), cwd });
+  await hook('claude', input(config.cwd), undefined, options);
+  const initial = await f.pair();
+  for (const [cwd, message] of [[repoA, 'Worked inside repo A'], [repoB, 'Worked inside repo B']]) {
+    await f.append(file, [c(id, message, { cwd })]);
+    await hook('claude', input(cwd), undefined, options);
+    await assert.rejects(fs.stat(configuration(cwd, f.env).stateDir), { code: 'ENOENT' });
+  }
+  const current = await f.pair();
+  assert.equal(current.codex.id, initial.codex.id);
+  assert.equal(current.claude.cursor.offset, (await fs.stat(file)).size);
+  assert.equal((await f.registry()).pairs.length, 1);
+  const delivered = await hook('codex', f.input('codex', current.codex, 'SessionStart'), config, options);
+  assert.match(delivered.hookSpecificOutput.additionalContext, /Worked inside repo A[\s\S]*Worked inside repo B/);
+});
+
 test('bidirectional sync: backfill, tools across hooks, retry/ack, compaction and no mirror loops', async t => {
   const f = await fixture(t), { config, id, file, input, pair, append } = f;
   await fs.writeFile(file, jsonl([
@@ -595,6 +618,71 @@ test('Codex mirrors register through app-server with native preview and retain m
   assert.equal(extract('codex', records.filter(r => r.type === 'event_msg'), p.codex.id).length, 0, 'preview is never exported back');
   await hook('claude', f.input(), f.config, opts);
   assert.equal((await f.registry()).pairs.length, 1);
+});
+
+test('compressed managed Codex mirror is replaced from current Claude context without losing its checkpoint', async t => {
+  for (const legacy of [false, true]) {
+    const f = await fixture(t);
+    await fs.writeFile(f.file, jsonl([c(f.id, 'OLD-CONTEXT')]));
+    await hook('claude', f.input(), f.config, opts);
+    const old = await f.pair(), pairFile = path.join(f.config.stateDir, `${old.id}.json`);
+    if (legacy) { delete old.codex.createdBy; await fs.writeFile(pairFile, JSON.stringify(old)); }
+    const checkpoint = await fs.readFile(pairFile, 'utf8'), compressed = old.codex.file + '.zst';
+    await fs.rename(old.codex.file, compressed);
+    const oldContent = await fs.readFile(compressed, 'utf8');
+    await f.append(f.file, [{ type: 'system', subtype: 'compact_boundary', sessionId: f.id }, c(f.id, 'CURRENT-CONTEXT', { isCompactSummary: true })]);
+    const calls = f.config.apiRequests.length;
+    await hook('claude', f.input(), f.config, opts);
+    const replacement = await f.pair(), mapping = (await f.registry()).pairs[0];
+    assert.equal(replacement.id, old.id); assert.equal(replacement.claude.id, old.claude.id);
+    assert.notEqual(replacement.codex.id, old.codex.id); assert.equal(replacement.codex.seeded, true);
+    assert.equal(mapping.id, old.id); assert.equal(mapping.claude, old.claude.id); assert.equal(mapping.codex, replacement.codex.id);
+    const seed = (await fs.readFile(replacement.codex.file, 'utf8')).trim().split('\n').map(JSON.parse).filter(r => r.type === 'response_item').map(r => JSON.stringify(r.payload)).join('\n');
+    assert.match(seed, /CURRENT-CONTEXT/); assert.doesNotMatch(seed, /OLD-CONTEXT/);
+    const backup = path.join(f.config.stateDir, `${old.id}.before-${old.codex.id}.json`);
+    assert.equal(await fs.readFile(backup, 'utf8'), checkpoint); assert.equal(await fs.readFile(compressed, 'utf8'), oldContent);
+    assert(f.config.apiThreads.has(old.codex.id));
+    assert(!f.config.apiRequests.slice(calls).some(r => ['thread/delete', 'thread/archive', 'thread/resume'].includes(r.method) && r.params.threadId === old.codex.id));
+    const starts = f.config.apiRequests.filter(r => r.method === 'thread/start').length;
+    await hook('claude', f.input(), f.config, opts);
+    assert.equal((await f.pair()).codex.id, replacement.codex.id);
+    assert.equal(f.config.apiRequests.filter(r => r.method === 'thread/start').length, starts);
+    assert.equal(await fs.readFile(backup, 'utf8'), checkpoint);
+  }
+});
+
+test('compressed mirror replacement retries thread creation and preserves an existing backup', async t => {
+  const f = await fixture(t); await fs.writeFile(f.file, jsonl([c(f.id, 'INITIAL')]));
+  await hook('claude', f.input(), f.config, opts);
+  const old = await f.pair(), backup = path.join(f.config.stateDir, `${old.id}.before-${old.codex.id}.json`);
+  await fs.writeFile(backup, 'existing backup'); await fs.rename(old.codex.file, old.codex.file + '.zst');
+  f.config.apiFail = 'thread/start';
+  assert.equal(await hook('claude', f.input(), f.config, opts), null);
+  assert.equal((await f.pair()).codex.seeded, false); assert.equal(await fs.readFile(backup, 'utf8'), 'existing backup');
+  await f.append(f.file, [c(f.id, 'RETRY-CONTEXT')]); delete f.config.apiFail;
+  await hook('claude', f.input(), f.config, opts);
+  const replacement = await f.pair();
+  assert.notEqual(replacement.codex.id, old.codex.id); assert.equal(replacement.codex.seeded, true);
+  assert.match(await fs.readFile(replacement.codex.file, 'utf8'), /RETRY-CONTEXT/);
+  assert.equal((await f.registry()).pairs[0].codex, replacement.codex.id);
+  assert.equal(await fs.readFile(backup, 'utf8'), 'existing backup');
+  assert((await fs.stat(old.codex.file + '.zst')).isFile());
+});
+
+test('missing Codex transcripts are not replaced without a compressed managed mirror', async t => {
+  for (const mode of ['missing', 'source', 'foreign']) {
+    const f = await fixture(t); await fs.writeFile(f.file, jsonl([c(f.id, 'SOURCE')]));
+    await hook('claude', f.input(), f.config, opts);
+    const old = await f.pair(), pairFile = path.join(f.config.stateDir, `${old.id}.json`);
+    if (mode === 'source') old.codex.mirror = false;
+    if (mode === 'foreign') old.codex.createdBy = 'other-client';
+    await fs.writeFile(pairFile, JSON.stringify(old));
+    if (mode === 'missing') await fs.unlink(old.codex.file);
+    else await fs.rename(old.codex.file, old.codex.file + '.zst');
+    await assert.rejects(hook('claude', f.input(), f.config, opts), { code: 'ENOENT' });
+    assert.equal((await f.pair()).codex.id, old.codex.id);
+    assert.equal(f.config.apiRequests.filter(r => r.method === 'thread/start').length, 1);
+  }
 });
 
 test('unavailable app-server defers creation; retry reuses its thread and does not duplicate an injection with a lost reply', async t => {

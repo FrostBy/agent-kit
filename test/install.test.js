@@ -68,6 +68,16 @@ test('Claude installation reuses existing logic with a fake CLAUDE_CONFIG_DIR', 
   assert.equal(JSON.parse(fs.readFileSync(path.join(env.CLAUDE_CONFIG_DIR, 'statusline.backup.json'), 'utf8')).statusLine.command, 'old');
 });
 
+test('broker installation connects Claude completion hooks and preserves other settings', async t => {
+  const { env } = fixture(t), file = path.join(env.CLAUDE_CONFIG_DIR, 'settings.json');
+  fs.writeFileSync(file, JSON.stringify({ model: 'keep', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo keep' }] }] } }));
+  await main(['--only', 'broker'], { env, tty: false, log() {}, exec() { assert.fail('Broker install must not build or launch an agent'); } });
+  const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(settings.model, 'keep');
+  assert.equal(settings.hooks.Stop[0].hooks[0].command, 'echo keep');
+  for (const event of ['SessionStart', 'Stop']) assert(settings.hooks[event].some(group => group.hooks.some(h => h.asyncRewake && h.args[0].endsWith('/mesh-hook.js'))));
+});
+
 test('voice insertion stays at the TOML root and backs up the exact original', async t => {
   const { env, file } = fixture(t);
   const before = '# keep this\nmodel = "codex"\n[profiles.test]\nexperimental_realtime_ws_backend_prompt = "nested; leave it"\n';

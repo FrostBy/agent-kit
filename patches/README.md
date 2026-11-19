@@ -19,6 +19,7 @@ Alongside the native command-backed footer, the Codex patch includes:
 4. Shift+Tab toggles Plan ↔ Auto (Full Access) without a confirmation modal while idle, including Windows terminals reporting Tab+Shift. The built-in Plan indicator is hidden when the custom footer is active; the JSON payload carries `mode`, and our renderer places the mode line last with spacing before it.
 5. Subagent v2 spawn uses a `readonly-`/`plan-` task name prefix to restrict the child, never to escalate permissions. The prefix is stripped before native name validation (lowercase letters, digits, underscores); subsequent calls use the returned path. V1 has no task name and remains stock. Guidance is sent as separate developer instructions, outside tool schemas and descriptions.
 6. Codex's status-line `max_lines` defaults to 32 as a safety ceiling; the footer's `maxLines` option controls its actual content row budget.
+7. F9 starts V3 dictation when a voice call is closed. F9 pauses and resumes capture, and completed fragments append to the same editable draft. Enter sends the draft as a normal text message. F8 or `/voice stop` closes dictation. Start with `codex --no-daemon` when your shared app-server is stock.
 
 ## Prerequisites / Требования
 
@@ -86,7 +87,7 @@ npm test
 node scripts/codex/verify-patches.js
 ```
 
-The explicit verification command needs the cached source archive. It tests all 48 valid feature combinations with `git -c core.longpaths=true apply --check` and application in a disposable clean tree, then checks the full selection against `tree-sha256.json`, recorded from the fully patched target tree. Use `--record-baseline` to regenerate affected-file hashes after a source/patch port; all combinations and stock-schema checks still run. Node tests cover manifest/dependency errors, paths, mocked requirements and Windows install/reinstall/sync/restore with fake executables and real junctions. They never launch Codex or access a real account.
+The explicit verification command needs the cached source archive. It tests every valid feature combination with `git -c core.longpaths=true apply --check` and application in a disposable clean tree, then checks the full selection against `tree-sha256.json`, recorded from the fully patched target tree. Use `--record-baseline` to regenerate affected-file hashes after a source/patch port; all combinations and stock-schema checks still run. Node tests cover manifest/dependency errors, paths, mocked requirements and Windows install/reinstall/sync/restore with fake executables and real junctions. They never launch Codex or access a real account.
 
 Cargo may refresh workspace package versions in Cargo.lock to the manifest version. Version-sensitive upstream snapshots may need regeneration for locally stamped builds.
 The prepared local toolchain lives in `.native/toolchain/bin`; it was extracted without installing Rust globally.
@@ -109,6 +110,8 @@ The installed Codex executable, user config, terminal profiles and PATH are not 
 
 The custom CLI runs `node statusline.js --codex-native` internally, passing a JSON snapshot on stdin and rendering its ANSI stdout inside the native footer. This entry point is not a separate terminal panel.
 Snapshot data includes model, effort, context, quota windows, active tool names and details, plan progress, reported subagent states, fast mode and already-cached PR metadata. Tool completion and turn interruption clear active calls; agent status notifications update the running count. Git comes from the shared local scanner.
+
+Quota reset times are exported as Unix seconds; human-readable local strings remain in `/status`. The default footer places quota windows on the model/context row. The shared quota renderer shows the reset countdown and warns with an exhaustion forecast when the current burn rate would consume the allowance before reset.
 
 The renderer preserves the original Claude layout, colors, gap and Git defaults. It omits the added M/D/S counters, cumulative-token row and quota prefix. Terminal height determines the row budget; the command runner has a 32-line safety cap. Git rendering retains totals for the whole umbrella and reports hidden repositories. Missing exact context counts are omitted rather than reconstructed from rounded percentages. The footer ends with a separated auto/plan/read-only mode line; its `maxLines` (default `4`) limits content only, while terminal height and Codex's explicit `max_lines` remain outer caps; `gapAfter` adds one final blank braille row only when it fits.
 

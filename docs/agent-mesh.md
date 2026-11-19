@@ -27,6 +27,8 @@ Live: `node scripts/agents/smoke-mesh.js --live`, либо `--only kimi|claude|c
 
 Брокер пишет `<name>.events.jsonl` с конвертом `v/id/seq/at/from/type/turnId/requestId/summary/payload`. Типы: `question`, `approval`, `turn.completed`, `error`, `agent.exited`, `request.resolved`. Итог ограничен 320 символами, полный текст остаётся в `.out.md`. Успешная запись команды в inbox означает только постановку; ошибки ответа приходят событием `error` с `commandId`. Pending ID непрозрачный, не JSON-RPC ID; разрешённый ответ уходит в исходное соединение. Завершение хода, interrupt, server resolution, disconnect и restart инвалидируют прежние ID. Повторный server request в том же соединении не создаёт второй вопрос. `isBlocking` и полные вопросы/options остаются в payload; nonblocking request может разрешиться самим сервером.
 
+При первом подключении hook сохраняет границу подписки даже через PostToolUse/Stop без SessionStart. Более старые результаты, ошибки и выходы тихо пропускаются независимо от существования PID и прежнего списка наблюдения: PID может уже принадлежать другому процессу. Из старой очереди сохраняются только вопросы/approvals живого исполнителя, чей request ID ещё есть в `state.pendingRequests`. Старые наблюдения без активности после границы подписки отбрасываются и не создают новые уведомления о смерти. События после начала подписки доставляются как обычно; журналы и отчёты сохраняются. Ручной `events --next` продолжает читать историю без этого фильтра.
+
 ```sh
 node scripts/agents/broker.js --agent codex --name worker --state SCRATCHPAD --prompt task.md --cwd PROJECT --approval-policy on-request
 node scripts/agents/broker.js events --state SCRATCHPAD --next --timeout-min 120
@@ -42,7 +44,7 @@ Default approval policy остаётся `never`; поддержаны такж�
 
 `events --next` читает DIR и одну вложенную папку, ждёт первое актуальное важное событие, печатает краткий итог и команду ответа. Exit 0 означает событие, 1 — timeout/ошибка. Один ожидатель на DIR защищён `.mesh-events.lock`, завершившийся владелец lock восстанавливается по PID. `.mesh-events.cursor.json` автоматически подтверждает событие при выдаче; `ack --state DIR --event EVENT_ID` доступен и идемпотентен. Не запускайте ручной waiter одновременно с hook для той же DIR. Cursor обновляется перед печатью: авария в этом промежутке может потерять уведомление, исходный JSONL сохраняется. Это не exactly-once доставка модели.
 
-Установка/удаление после ревью (в этой реализации на реальном профиле **не запускались**):
+Установка/удаление (основной установщик теперь подключает hook при выборе брокера):
 
 ```sh
 node scripts/agents/mesh-hook.js install
@@ -55,15 +57,16 @@ node scripts/agents/mesh-hook.js uninstall
 {
   "hooks": {
     "SessionStart": [{"hooks": [{"type": "command", "command": "node", "args": ["Z:/claude-statusline/scripts/agents/mesh-hook.js"], "asyncRewake": true, "timeout": 14400}]}],
+    "PostToolUse": [{"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command": "node", "args": ["Z:/claude-statusline/scripts/agents/mesh-hook.js"], "asyncRewake": true, "timeout": 14400}]}],
     "Stop": [{"hooks": [{"type": "command", "command": "node", "args": ["Z:/claude-statusline/scripts/agents/mesh-hook.js"], "asyncRewake": true, "timeout": 14400}]}],
     "SessionEnd": [{"hooks": [{"type": "command", "command": "node", "args": ["Z:/claude-statusline/scripts/agents/mesh-hook.js"], "timeout": 5}]}]
   }
 }
 ```
 
-Hook читает `session_id`, `transcript_path`, `cwd` из stdin и вычисляет `<os.tmpdir()>/claude/<project-slug>/<session_id>/scratchpad`. Slug из transcript имеет приоритет (в том числе регистр диска); fallback использует существующий project slug helper. `--state` брокера должен указывать на эту scratchpad либо её подпапку. Subagent/broker sessions пропускаются. Событие подтверждается курсором, затем короткий текст пишется в stderr и hook выходит 2; SessionStart/Stop делят тот же lock. Stop после обработки снова ставит ожидатель; `stop_hook_active` не отключает вооружение, поскольку это фоновый hook.
+Hook читает `session_id`, `transcript_path`, `cwd` из stdin. Актуальный Claude CLI использует `<temp>/claude/<sha256(project-slug.toLowerCase())[0:16]>/<session_id>/scratchpad`; прежний читаемый slug тоже поддерживается. Учитываются `CLAUDE_CODE_TMPDIR`, `CLAUDE_CODE_HOST_SHORT_TEMP_DIRS` и desktop entrypoint. Slug из transcript имеет приоритет; fallback вычисляет его из cwd. `--state` брокера должен указывать на эту scratchpad либо её подпапку. Subagent/broker sessions пропускаются. Событие подтверждается курсором, затем короткий текст пишется в stderr и hook выходит 2; SessionStart/PostToolUse/Stop делят тот же lock. PostToolUse после Bash/PowerShell и Stop снова ставят ожидатель; `stop_hook_active` не отключает вооружение, поскольку это фоновый hook.
 
-По [актуальной документации Claude hooks](https://code.claude.com/docs/en/hooks#run-hooks-in-the-background), `asyncRewake` запускается в фоне, будит idle Claude на exit 2 и передаёт stderr (либо stdout, если stderr пуст). Его timeout **действует**, в отличие от `async: true`. Документация указывает default 600 секунд для command hooks и не задаёт отдельный максимум для asyncRewake. Здесь timeout — 14400 секунд, внутреннее ожидание — 235 минут с запасом 5 минут. Если при запуске в scratchpad нет живого брокера, hook сразу выходит 0 без ожидателя; следующий Stop перевооружит его. Без события служебное пробуждение возможно только после 235 минут ожидания, если брокер ещё жив, для перевооружения через Stop. Запущенный async hook завершается вместе с `claude -p`; не использовать этот режим для постоянного idle waiter.
+По [актуальной документации Claude hooks](https://code.claude.com/docs/en/hooks#run-hooks-in-the-background), `asyncRewake` запускается в фоне, будит idle Claude на exit 2 и передаёт stderr (либо stdout, если stderr пуст). Его timeout **действует**, в отличие от `async: true`. Здесь timeout — 14400 секунд, внутреннее ожидание — 235 минут с запасом 5 минут. Ожидатель слушает и пустую scratchpad: старт процесса брокера может произойти позже запуска hook. Без события служебное пробуждение возможно после 235 минут только при живом брокере, для перевооружения через Stop; иначе hook тихо выходит. Следующая команда или Stop снова подключает слушатель. Запущенный async hook завершается вместе с `claude -p`; не использовать этот режим для постоянного idle waiter. Регрессионный тест проверяет доставку `turn.completed` до выхода процесса исполнителя, включая запуск подписки до появления state-файла. Native idle wake в настоящем интерактивном TUI этим тестом не подтверждается.
 
 Проверено: `node --test test/agent-broker.test.js test/agent-mesh.test.js` с fake proxy/stdio, временными scratchpad/settings и без настоящих аккаунтов. Live-приёмка: Claude final → idle → Codex question → answer → completion; approval → deny; два события подряд; timeout → Stop → новый event; concurrent user Enter. `request_user_input` должен быть доступен в режиме агента (см. ниже ограничение Plan). SIGKILL самого брокера всё ещё требует supervisor из итерации 6 и не создаёт `agent.exited` из погибшего процесса.
 

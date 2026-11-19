@@ -71,15 +71,32 @@ function applyPatches(dirs, check = false) {
   if (check) console.log(`Applicable: ${dirs.features.map(f => f.id).join(',') || 'none'}`);
 }
 
+function matchWindowsMigrationChecksums(stateDir) {
+  const migrationDirs = fs.readdirSync(stateDir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && (entry.name === 'migrations' || entry.name.endsWith('_migrations')));
+  for (const { name } of migrationDirs) {
+    const dir = path.join(stateDir, name);
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.sql')) continue;
+      const file = path.join(dir, entry.name);
+      const sql = fs.readFileSync(file, 'utf8');
+      const windowsSql = sql.replace(/(?<!\r)\n/g, '\r\n');
+      if (windowsSql !== sql) fs.writeFileSync(file, windowsSql);
+    }
+  }
+}
+
 async function build(opts) {
   checkCargoHomePath();
   checkRequirements();
   const { manifest, dirs } = await prepare(opts);
   applyPatches(dirs);
+  const sourceDir = path.join(dirs.work, 'codex-rs');
+  matchWindowsMigrationChecksums(path.join(sourceDir, 'state'));
   const env = { ...process.env, CARGO_TARGET_DIR: dirs.target, STABLE_GIT_COMMIT: manifest.commit, CODEX_BUILD_COMMIT: manifest.commit };
-  run('cargo', ['build', '-p', 'codex-cli', '--bin', 'codex', ...(opts.dev ? [] : ['--release'])], { cwd: path.join(dirs.work, 'codex-rs'), env, stdio: 'inherit' });
+  run('cargo', ['build', '-p', 'codex-cli', '--bin', 'codex', ...(opts.dev ? [] : ['--release'])], { cwd: sourceDir, env, stdio: 'inherit' });
   fs.mkdirSync(path.join(dirs.native, 'metadata'), { recursive: true });
   fs.writeFileSync(path.join(dirs.native, 'metadata/build.json'), JSON.stringify({ version: manifest.version, commit: manifest.commit, features: dirs.features.map(f => f.id), featureHash: dirs.featureHash, binary: dirs.binary, sha256: fileHash(dirs.binary) }, null, 2));
   console.log(`Built ${dirs.binary}`);
 }
-module.exports = { prepare, applyPatches, build, cleanupWork, checkCargoHomePath };
+module.exports = { prepare, applyPatches, build, cleanupWork, checkCargoHomePath, matchWindowsMigrationChecksums };

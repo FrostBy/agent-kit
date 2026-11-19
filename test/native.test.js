@@ -52,18 +52,17 @@ test('native mode renders once at the end with a spacer and separately colored h
   }
 });
 
-test('native snapshot keeps the original rows and omits invented counters', async () => {
+test('native snapshot keeps quota beside model and context and omits invented counters', async () => {
   let scanned;
   const rows = await renderNative(snapshot(), cfg({ lines: [...CODEX_DEFAULTS.lines, ['codex', 'kimi']] }), 0, {
     git: (cwd) => { scanned = cwd; return null; }, usage: forbidden, today: forbidden, plan: forbidden, transcript: forbidden, codex: forbidden, kimi: forbidden,
   });
   const out = rows.join('\n');
   assert.equal(scanned, root);
-  assert.match(rows[0], /GPT-6.1 high.*ctx .*47%.*read_file render.js.*3\/7.*agents 2/);
-  assert.match(rows[1], /^7d .*3%/);
-  assert.equal(rows[2], '#128');
-  assert.equal(rows[3], '\u2800');
-  assert.equal(rows.length, 4);
+  assert.match(rows[0], /GPT-6.1 high.*ctx .*47%.*7d .*3%.*read_file render.js.*3\/7.*agents 2/);
+  assert.equal(rows[1], '#128');
+  assert.equal(rows[2], '\u2800');
+  assert.equal(rows.length, 3);
   assert.match(out, /224k\/475k/);
   assert.doesNotMatch(out, /quota used|session tokens|\b[MDS]\d|Ready|working|500k|1M\//);
 });
@@ -76,11 +75,20 @@ test('native footer matches the Claude renderer for the same available data', as
     workspace: { project_dir: root, current_dir: input.cwd },
     context_window: { used_percentage: 47, context_window_size: 475000, current_usage: { input_tokens: 223563 } },
     rate_limits: { seven_day: { used_percentage: 3 } },
-  }, deepMerge(DEFAULTS, { color: false, links: false }), 0, {
+  }, deepMerge(DEFAULTS, { color: false, links: false, lines: CODEX_DEFAULTS.lines.map(line => line.map(id => id === 'limits' ? 'limit-7d' : id)) }), 0, {
     git, usage: () => null, today: () => null, plan: () => null, transcript: () => input.activity,
   });
   expected.push('\u2800');
   assert.deepEqual(actual, expected);
+});
+
+test('native Unix quota timestamp renders countdown and burn forecast on the first row', async () => {
+  const now = Date.parse('2026-11-18T12:00:00Z'), input = snapshot();
+  input.activity = null; input.pr = null;
+  input.rate_limits = [{ id: 'codex', secondary: { used_percentage: 98, window_minutes: 10080, resets_at: now / 1000 + 4 * 86400 + 20 * 3600 } }];
+  const rows = await renderNative(input, cfg(), now, { git: () => null });
+  assert.match(rows[0], /GPT-6.1 high.*ctx .*7d .*98%.*↻ 4d20h out in 1h03m/);
+  assert.equal(rows.length, 2); assert.equal(rows[1], '\u2800');
 });
 
 test('native footer preserves whole-umbrella totals when repositories exceed row budget', async () => {
@@ -92,7 +100,7 @@ test('native footer preserves whole-umbrella totals when repositories exceed row
     assert.match(rows.at(-2), /more.*Σ \+48 −60/);
     assert.equal(rows.at(-1), '\u2800');
     assert.doesNotMatch(rows.join('\n'), /\b[MDS]\d/);
-    assert.equal(rows.filter((line) => /repo\d+\s/.test(line)).length, height === 24 ? 4 : 3);
+    assert.equal(rows.filter((line) => /repo\d+\s/.test(line)).length, 4);
   }
 });
 
@@ -193,7 +201,8 @@ test('narrow footer moves attention to one temporary row and retains Git totals'
   assert.match(rows.at(-2), /Σ \+48 −60/);
   input.activity.agent_attention = [];
   const healthy = await renderNative(input, cfg(), 0, { git: () => null });
-  assert.match(healthy[1], /^7d/);
+  assert.match(healthy[0], /ctx .*7d/);
+  assert.equal(healthy[1], '#128');
 });
 
 test('attention uses severity colors and summarizes additional agents', async () => {

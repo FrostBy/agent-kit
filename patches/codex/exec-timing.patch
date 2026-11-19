@@ -1,37 +1,40 @@
 diff --git a/codex-rs/tui/src/exec_cell/live_output.rs b/codex-rs/tui/src/exec_cell/live_output.rs
+index 46f9ab2..b06b05b 100644
 --- a/codex-rs/tui/src/exec_cell/live_output.rs
 +++ b/codex-rs/tui/src/exec_cell/live_output.rs
-@@ -94,6 +94,10 @@
-                 self.tail.push_back(line);
-             }
+@@ -96,6 +96,10 @@ impl LiveCommandOutput {
          }
-+    }
-+
-+    pub(super) fn completed_lines(&self) -> usize {
-+        self.completed_lines
      }
  
-     pub(super) fn total_lines(&self) -> usize {
-diff --git a/codex-rs/tui/src/exec_cell/model.rs b/codex-rs/tui/src/exec_cell/model.rs
---- a/codex-rs/tui/src/exec_cell/model.rs
-+++ b/codex-rs/tui/src/exec_cell/model.rs
-@@ -44,6 +44,12 @@
-                 (total, total)
-             }
-         }
++    pub(super) fn completed_lines(&self) -> usize {
++        self.completed_lines
 +    }
 +
+     pub(super) fn total_lines(&self) -> usize {
+         self.completed_lines
+             .saturating_add(usize::from(self.has_partial_line))
+diff --git a/codex-rs/tui/src/exec_cell/model.rs b/codex-rs/tui/src/exec_cell/model.rs
+index 241e682..d4df3de 100644
+--- a/codex-rs/tui/src/exec_cell/model.rs
++++ b/codex-rs/tui/src/exec_cell/model.rs
+@@ -65,6 +65,12 @@ impl CommandOutput {
+         }
+     }
+ 
 +    pub(super) fn completed_live_lines(&self) -> usize {
 +        self.live_output
 +            .as_ref()
 +            .map_or(0, LiveCommandOutput::completed_lines)
-     }
- 
++    }
++
      /// Returns retained preview lines with reverse traversal for efficient tail rendering.
+     pub(super) fn lines(&self) -> impl DoubleEndedIterator<Item = Cow<'_, str>> {
+         match self.live_output.as_ref() {
 diff --git a/codex-rs/tui/src/exec_cell/render.rs b/codex-rs/tui/src/exec_cell/render.rs
+index fe6c327..9e37da0 100644
 --- a/codex-rs/tui/src/exec_cell/render.rs
 +++ b/codex-rs/tui/src/exec_cell/render.rs
-@@ -15,6 +15,7 @@
+@@ -15,6 +15,7 @@ use crate::motion::ReducedMotionIndicator;
  use crate::motion::activity_indicator;
  use crate::render::highlight::highlight_bash_to_lines;
  use crate::render::line_utils::line_to_static;
@@ -39,7 +42,7 @@ diff --git a/codex-rs/tui/src/exec_cell/render.rs b/codex-rs/tui/src/exec_cell/r
  use crate::style::accent_color;
  use crate::terminal_hyperlinks::HyperlinkLine;
  use crate::terminal_hyperlinks::LogicalLineSource;
-@@ -493,7 +494,27 @@
+@@ -537,7 +538,27 @@ impl ExecCell {
          } else {
              strip_bash_lc_and_escape(&call.command)
          };
@@ -68,10 +71,11 @@ diff --git a/codex-rs/tui/src/exec_cell/render.rs b/codex-rs/tui/src/exec_cell/r
  
          let continuation_wrap_width = layout.command_continuation.wrap_width(width);
          let continuation_opts =
-@@ -857,6 +878,78 @@
+@@ -900,6 +921,78 @@ mod tests {
+             .collect::<String>()
      }
  
-     #[test]
++    #[test]
 +    fn command_header_elapsed_and_live_lines_snapshot() {
 +        let mut cell = new_active_exec_command(
 +            "call-id".into(),
@@ -143,12 +147,12 @@ diff --git a/codex-rs/tui/src/exec_cell/render.rs b/codex-rs/tui/src/exec_cell/r
 +        assert!(cell.group.calls[0].output.as_ref().unwrap().line_counts().1 < 600_001);
 +    }
 +
-+    #[test]
+     #[test]
      fn user_shell_output_is_limited_by_screen_lines() {
          let long_url_like = format!(
-             "https://example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/{}",
 diff --git a/codex-rs/tui/src/exec_cell/snapshots/codex_tui__exec_cell__render__tests__command_header_elapsed_and_live_lines.snap b/codex-rs/tui/src/exec_cell/snapshots/codex_tui__exec_cell__render__tests__command_header_elapsed_and_live_lines.snap
 new file mode 100644
+index 0000000..3d548cc
 --- /dev/null
 +++ b/codex-rs/tui/src/exec_cell/snapshots/codex_tui__exec_cell__render__tests__command_header_elapsed_and_live_lines.snap
 @@ -0,0 +1,9 @@

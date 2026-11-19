@@ -1,7 +1,8 @@
 diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
+index 6a42146..9eb6c51 100644
 --- a/codex-rs/core/src/responses_retry.rs
 +++ b/codex-rs/core/src/responses_retry.rs
-@@ -85,7 +85,20 @@
+@@ -86,7 +86,20 @@ pub(crate) async fn handle_response_stream_error(
          ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
      };
      let retry_count = retry_state.retries.saturating_add(1);
@@ -24,9 +25,10 @@ diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_
      };
      let retry_after = err.retry_after();
 diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suite/retry_after.rs
+index c2b1d6c..3ce1fbf 100644
 --- a/codex-rs/core/tests/suite/retry_after.rs
 +++ b/codex-rs/core/tests/suite/retry_after.rs
-@@ -500,7 +500,8 @@
+@@ -500,7 +500,8 @@ async fn exhausted_http_retries_preserve_deadline_through_error_mapping() {
  }
  
  /// Retry advice changes delays but never extends either retry budget or its displayed count.
@@ -36,7 +38,7 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
  #[test_case::test_case(Some("0"), 0, 3; "advice_without_stream_retries")]
  #[test_case::test_case(Some("0"), 2, 9; "advice_with_stream_retries")]
  #[tokio::test(flavor = "current_thread")]
-@@ -563,13 +564,9 @@
+@@ -563,13 +564,9 @@ async fn responses_http_overload_respects_retry_limits(
      .expect("overload retries should finish the turn within 10 seconds");
  
      assert_eq!(error_events, 1);
@@ -53,7 +55,7 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
      assert_eq!(reconnect_messages, expected_messages);
      let request_count = server
          .received_requests()
-@@ -938,7 +935,7 @@
+@@ -938,7 +935,7 @@ async fn compact_v2_rate_limit_uses_server_advice(
      Ok(())
  }
  
@@ -62,7 +64,7 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
  #[tokio::test(flavor = "current_thread")]
  async fn compact_v2_overload_without_retry_after_exhausts_request_retries() -> Result<()> {
      skip_if_no_network!(Ok(()));
-@@ -965,7 +962,7 @@
+@@ -965,7 +962,7 @@ async fn compact_v2_overload_without_retry_after_exhausts_request_retries() -> R
          .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
          .with_config(|config| {
              config.model_provider.request_max_retries = Some(2);
@@ -71,7 +73,7 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
          })
          .build_with_auto_env(&server)
          .await?;
-@@ -1270,7 +1267,7 @@
+@@ -1270,7 +1267,7 @@ async fn sse_failure_uses_server_advice(
      Ok(())
  }
  
@@ -80,7 +82,7 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
  #[tokio::test(flavor = "current_thread")]
  async fn sse_overload_with_retry_after_is_terminal() -> Result<()> {
      skip_if_no_network!(Ok(()));
-@@ -1290,7 +1287,7 @@
+@@ -1290,7 +1287,7 @@ async fn sse_overload_with_retry_after_is_terminal() -> Result<()> {
      let test = test_codex()
          .with_config(|config| {
              config.model_provider.request_max_retries = Some(2);
@@ -89,17 +91,16 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
          })
          .build_with_auto_env(&server)
          .await?;
-@@ -1343,31 +1340,43 @@
+@@ -1343,32 +1340,44 @@ async fn sse_overload_with_retry_after_is_terminal() -> Result<()> {
      Ok(())
  }
  
 -/// A streamed backend overload without retry advice must complete with one terminal error.
--#[tokio::test(flavor = "current_thread")]
--async fn sse_overload_without_retry_after_is_terminal() -> Result<()> {
 +/// Streamed overloads without advice stop when the configured retry budget is exhausted.
 +#[test_case::test_case(0; "disabled")]
 +#[test_case::test_case(1; "one_retry")]
-+#[tokio::test(flavor = "current_thread")]
+ #[tokio::test(flavor = "current_thread")]
+-async fn sse_overload_without_retry_after_is_terminal() -> Result<()> {
 +async fn sse_overload_without_retry_after_respects_retry_limit(max_retries: u64) -> Result<()> {
      skip_if_no_network!(Ok(()));
  
@@ -134,17 +135,18 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
          .await?;
  
      submit_user_input(&test, "reject the streamed overload").await?;
-+
+ 
 +    for attempt in 1..=max_retries {
 +        let retry = telemetry.next_retry().await;
 +        assert_eq!(retry.attempt, attempt);
 +        assert!((Duration::from_millis(4500)..Duration::from_millis(5500)).contains(&retry.delay));
 +        wait_for_retry(&mut telemetry, &retry).await;
 +    }
- 
++
      let mut error_events = 0;
      let mut stream_error_events = 0;
-@@ -1397,8 +1406,8 @@
+     loop {
+@@ -1397,8 +1406,8 @@ async fn sse_overload_without_retry_after_is_terminal() -> Result<()> {
      }
  
      assert_eq!(error_events, 1);
@@ -155,7 +157,7 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
      let request_count = server
          .received_requests()
          .await
-@@ -1406,7 +1415,7 @@
+@@ -1406,7 +1415,7 @@ async fn sse_overload_without_retry_after_is_terminal() -> Result<()> {
          .into_iter()
          .filter(|request| request.url.path() == "/v1/responses")
          .count();
@@ -164,17 +166,16 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
      assert_eq!(
          telemetry.events.try_recv(),
          Err(mpsc::error::TryRecvError::Empty)
-@@ -2134,13 +2143,15 @@
+@@ -2150,13 +2159,15 @@ async fn websocket_overload_retries_only_while_it_has_retry_after(
      Ok(())
  }
  
 -/// Headerless websocket overloads must neither reconnect nor fall back to HTTP.
--#[tokio::test(flavor = "current_thread")]
--async fn websocket_overload_without_retry_after_is_terminal() -> Result<()> {
 +/// Headerless overloads recover in the same turn when stream retries are enabled.
 +#[test_case::test_case(0; "disabled")]
 +#[test_case::test_case(1; "recovers")]
-+#[tokio::test(flavor = "current_thread")]
+ #[tokio::test(flavor = "current_thread")]
+-async fn websocket_overload_without_retry_after_is_terminal() -> Result<()> {
 +async fn websocket_overload_without_retry_after(max_retries: u64) -> Result<()> {
      skip_if_no_network!(Ok(()));
  
@@ -184,7 +185,7 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
          vec![
              responses::ev_response_created("prewarm"),
              responses::ev_completed("prewarm"),
-@@ -2153,15 +2164,16 @@
+@@ -2169,15 +2180,16 @@ async fn websocket_overload_without_retry_after_is_terminal() -> Result<()> {
                  "message": "This model is disabled."
              }
          })],
@@ -205,21 +206,21 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
          })
          .build_with_websocket_server(&server)
          .await?;
-@@ -2171,6 +2183,13 @@
-         .await;
+@@ -2188,6 +2200,13 @@ async fn websocket_overload_without_retry_after_is_terminal() -> Result<()> {
      assert_eq!(warmup.body_json()["generate"].as_bool(), Some(false));
      submit_user_input(&test, "reject the websocket overload").await?;
-+
+ 
 +    for attempt in 1..=max_retries {
 +        let retry = telemetry.next_retry().await;
 +        assert_eq!(retry.attempt, attempt);
 +        assert!((Duration::from_millis(4500)..Duration::from_millis(5500)).contains(&retry.delay));
 +        wait_for_retry(&mut telemetry, &retry).await;
 +    }
- 
++
      let mut error_events = 0;
      let mut stream_error_events = 0;
-@@ -2197,7 +2216,7 @@
+     let mut fallback_warning_events = 0;
+@@ -2213,7 +2232,7 @@ async fn websocket_overload_without_retry_after_is_terminal() -> Result<()> {
              EventMsg::TurnComplete(event) => {
                  assert_eq!(
                      event.error.and_then(|error| error.codex_error_info),
@@ -228,7 +229,7 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
                  );
                  break;
              }
-@@ -2205,14 +2224,17 @@
+@@ -2221,14 +2240,17 @@ async fn websocket_overload_without_retry_after_is_terminal() -> Result<()> {
          }
      }
  
@@ -250,14 +251,15 @@ diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suit
          telemetry.events.try_recv(),
          Err(mpsc::error::TryRecvError::Empty)
 diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
+index efd48f1..9c37b0f 100644
 --- a/codex-rs/model-provider-info/src/lib.rs
 +++ b/codex-rs/model-provider-info/src/lib.rs
-@@ -66,7 +66,7 @@
+@@ -71,7 +71,7 @@ pub fn read_managed_residency_requirement() -> Option<ResidencyRequirement> {
  }
  
  const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
 -const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 +const DEFAULT_STREAM_MAX_RETRIES: u64 = 10;
  const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
- const DEFAULT_AWS_CREDENTIAL_EXPORT_TIMEOUT_MS: u64 = 30_000;
+ const DEFAULT_CREDENTIAL_EXPORT_TIMEOUT_MS: u64 = 30_000;
  const DEFAULT_AWS_AUTH_REFRESH_TIMEOUT_MS: u64 = 300_000;
