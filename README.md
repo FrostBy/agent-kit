@@ -12,8 +12,8 @@
 
 - **Statusline for Claude Code and Codex** (Codex: native footer or a log panel): context, quotas, git across umbrella repositories, runtime activity, Codex/Kimi executor widgets. Dependency-free Node, TUI editor, English and Russian.
 - **Codex patches**: a native footer driven by the same renderer, full diffs, command timing, capacity retries, Shift+Tab Plan/Auto, restricted subagents via a `readonly-`/`plan-` task name prefix. You build Codex yourself from the patched sources; no binaries are shipped.
-- **Faster Codex voice**: a realtime prompt for quicker speech (configuration only).
-- **Agent broker**: Codex, Kimi ACP and Claude background workers, interactive decisions and event delivery to orchestrators; finished Codex threads are archived.
+- **Codex dictation and voice**. F9 dictates into the draft, F8 starts or stops voice, and F10 mutes speaker playback. A separate realtime prompt can speed up spoken replies.
+- **Agent broker**. Codex, Kimi, Claude and OpenCode background workers, interactive decisions and event delivery to orchestrators. Finished Codex worker threads are archived.
 - **Session sync (experimental)**: a Claude Code session and a Codex session in the same project mirror each other both ways, with native history, titles and tool calls; continue in Codex when Claude tokens run out and back.
 
 Русская версия: [README.RU.md](README.RU.md)
@@ -47,12 +47,12 @@ git clone https://github.com/FrostBy/agent-kit && cd agent-kit
 node install.js          # or install.cmd / sh install.sh
 ```
 
-Pick items with arrows, Space and Enter: Claude statusline, each Codex patch separately, faster voice. Dependencies are added automatically. Non-interactive:
+Use the arrow keys, Space and Enter to choose the Claude statusline, broker, session sync, individual Codex patches or the optional faster voice prompt. Dependencies are added automatically.
 
 ```sh
 node install.js --list
 node install.js --only claude
-node install.js --only statusline,full-diff,interaction-modes,voice
+node install.js --only statusline,dictation
 node install.js --yes --skip voice
 ```
 
@@ -79,6 +79,16 @@ The footer uses the Claude layout with data from native CLI JSON and ends with a
 
 Details in [patches/README.md](patches/README.md): what each patch adds, build/install internals, paths and limitations.
 
+### Dictation and voice
+
+The `dictation` patch adds the default shortcuts below.
+
+- **F9** starts dictation and pauses or resumes capture. In voice mode it toggles the microphone.
+- **Enter** sends the visible draft immediately. Capture keeps its current state, and late words appear in the next draft.
+- **F8** starts voice mode or stops either active mode. **F10** toggles speaker playback in voice mode and can be reassigned in `/keymap`.
+
+Dictation tries one replacement call after a connection loss and preserves the draft and pause state. Open a new Codex window after installing an updated build. Use `codex --no-daemon` for dictation when the shared app-server runs an unpatched build.
+
 <details>
 <summary><b>Standalone log inspector (legacy mode)</b></summary>
 
@@ -97,7 +107,7 @@ node statusline.js --codex --preview    # sample umbrella with three repositorie
 
 Global and project [model policies](docs/agent-models.md) control connector priority and allowed models. `--agent opencode` runs the OpenCode V2 CLI through ACP, including models restricted to the OpenCode client.
 
-**Broker.** Run Codex (shared app-server), Kimi (`kimi acp`) or Claude (persistent stream-json) as background workers. Questions, permissions, cancellation and session resurrection use the same broker commands. Codex and server-owned Kimi web orchestrators can receive events directly; Claude supports the event waiter and wake hook installed by `node install.js --only broker`. The hook listens for task completion while the persistent broker process remains alive. Kimi/Claude queue busy messages for the next turn (`steer=false`). Point `--state` at the scratchpad the statusline reads. `send/wait` print and ACK the result; `send` revives an exited worker from its saved session. See the [short broker README](scripts/agents/README.md) for commands, executable overrides, the legacy `--kimi-print` flag and isolated live tests.
+**Broker.** Run Codex (shared app-server), Kimi (`kimi acp`), Claude (persistent stream-json) or OpenCode (ACP) as background workers. Questions, permissions, cancellation and session resumption use the same broker commands. Kimi, Claude and OpenCode queue busy messages for the next turn (`steer=false`). Point `--state` at the scratchpad the statusline reads. `send/wait` print and acknowledge the result. Commands, executable overrides and delivery options are in the [broker guide](scripts/agents/README.md).
 
 ```sh
 node scripts/agents/broker.js --agent codex --name reviewer --state /tmp/scratchpad --prompt /tmp/prompt.md --cwd /path/to/project
@@ -105,7 +115,7 @@ node scripts/agents/broker.js --agent codex --name reviewer --state /tmp/scratch
 
 Brokers exit after 15 idle minutes (`--idle-min` overrides); `send` revives a dead broker using saved settings and its Codex/Kimi session, without replaying the initial prompt. Mesh hooks ignore normal/idle exits; the synchronous SessionEnd hook closes session brokers, and a detected owner PID also binds their lifetime.
 
-**Interactive mesh.** Use `broker.js answer|approve|deny --name X --state DIR --request ID` for pending requests. `interrupt/exit` work during a turn. Codex's `--approval-policy` defaults to `never`; Claude never bypasses permissions. The optional Claude `mesh-hook.js` uses `asyncRewake` on SessionStart/Stop; install it explicitly with `node scripts/agents/mesh-hook.js install` (remove with `uninstall`). See [setup and the live validation matrix](docs/agent-mesh.md). Autonomous Claude idle wake and native TUI rendering still need acceptance; loopback CLI protocol tests are covered separately.
+**Interactive mesh.** Use `broker.js answer|approve|deny --name X --state DIR --request ID` for pending requests. `interrupt/exit` work during a turn. Codex's `--approval-policy` defaults to `never`. `node install.js --only broker` installs the Claude wake hook for SessionStart, PostToolUse and Stop. It can deliver a result while the worker process is still running. See [setup and the live validation matrix](docs/agent-mesh.md).
 
 **Session sync** is off by default, including with `--yes`:
 
@@ -115,6 +125,8 @@ node scripts/agents/sync.js uninstall
 ```
 
 It adds global hooks to `CLAUDE_CONFIG_DIR/settings.json` and `CODEX_HOME/config.toml` and activates per project only after both clients have been used in that directory. Each source session gets a mirror in the other client, titled `<source title> · Claude/Codex`: resume it there and continue. The mirror carries the latest compacted context (about 50k tokens, `SESSION_SYNC_CONTEXT_TOKENS`) with native history and tool calls; later turns arrive as hook context. Broker agents, subagents and noninteractive sessions are excluded. Nothing is executed and no credentials are read, but transferred text can contain private data.
+
+A Claude session started in an umbrella directory keeps the same mirror when moving between child repositories. If Codex compresses a managed mirror, the next Claude hook can create a replacement from the current context.
 
 Internals, limits, state layout and manual checks: [docs/sync.md](docs/sync.md).
 
