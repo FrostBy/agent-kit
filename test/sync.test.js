@@ -101,6 +101,39 @@ test('Claude launched in an umbrella keeps the same mirror when changing reposit
   assert.match(delivered.hookSpecificOutput.additionalContext, /Worked inside repo A[\s\S]*Worked inside repo B/);
 });
 
+test('a Claude profile sharing projects resumes a verified mirror from the owning registry', async t => {
+  const f = await fixture(t), { config } = f;
+  const id = randomUUID(), file = path.join(config.codexSessionsDir, `${id}.jsonl`);
+  await fs.mkdir(config.codexSessionsDir, { recursive: true });
+  await fs.writeFile(file, jsonl([{ type: 'session_meta', payload: { id, cwd: config.cwd, source: 'cli' } }, x('Initial Codex context')]));
+  await hook('codex', f.input('codex', { id, file }), config, opts);
+  const pair = await f.pair();
+  await f.append(file, [x('Latest Codex context')]);
+  await hook('codex', f.input('codex', { id, file }), config, opts);
+
+  const env = { ...f.env, CLAUDE_CONFIG_DIR: path.join(f.root, 'claude-work') };
+  const work = configuration(config.cwd, env);
+  await fs.mkdir(work.stateDir, { recursive: true });
+  await fs.symlink(config.claudeProjectsDir, work.claudeProjectsDir, process.platform === 'win32' ? 'junction' : 'dir');
+  const workRegistry = path.join(work.stateDir, 'pairs.json');
+  const workContents = JSON.stringify({ version: 3, pairs: [{ id: randomUUID(), claude: randomUUID(), codex: randomUUID() }] });
+  await fs.writeFile(workRegistry, workContents);
+
+  const transcript = path.join(work.claudeProjectsDir, path.relative(config.claudeProjectsDir, pair.claude.file));
+  const input = f.input('claude', { id: pair.claude.id, file: transcript }, 'SessionStart');
+  const options = { ...opts, env, connectCodex: config.connectCodex };
+  const output = await hook('claude', input, undefined, options);
+  assert.match(output.hookSpecificOutput.additionalContext, /Latest Codex context/);
+  assert.equal(await fs.readFile(workRegistry, 'utf8'), workContents);
+  assert.equal((await f.registry()).pairs.length, 1);
+  assert((await f.pair()).claude.inflight.length > 0);
+
+  const [marker, ...rest] = (await fs.readFile(pair.claude.file, 'utf8')).split('\n');
+  await fs.writeFile(pair.claude.file, [JSON.stringify({ ...JSON.parse(marker), pairId: randomUUID() }), ...rest].join('\n'));
+  await assert.rejects(hook('claude', input, undefined, options), error =>
+    error.message.includes('Orphan mirror') && error.message.includes(workRegistry));
+});
+
 test('bidirectional sync: backfill, tools across hooks, retry/ack, compaction and no mirror loops', async t => {
   const f = await fixture(t), { config, id, file, input, pair, append } = f;
   await fs.writeFile(file, jsonl([
@@ -717,6 +750,7 @@ test('Claude mirrors always have a first user prompt, a title, and a connected a
     const messages = rows.filter(row => row.message);
     assert.equal(messages[0].type, 'user'); assert.match(messages[0].message.content, /\u00b7 Codex$/);
     assert.equal(messages.at(-1).type, 'assistant');
+    if (!content.length) assert.match(messages.at(-1).message.content[0].text, /Waiting for the first messages/);
     for (let n = 1; n < messages.length; n++) assert.equal(messages[n].parentUuid, messages[n - 1].uuid);
     assert.match(rows.find(row => row.type === 'custom-title').customTitle, /\u00b7 Codex$/);
     assert(!messages.some(row => row.isSidechain || row.isMeta || row.isNonInteractiveSession));

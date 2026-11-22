@@ -57,6 +57,35 @@ async function claudeProject(input, config) {
   }
 }
 
+async function sharedClaudeMirrorConfig(input, config) {
+  const projects = await canonical(config.claudeProjectsDir);
+  if (same(projects, config.claudeProjectsDir) || path.basename(projects).toLowerCase() !== 'projects') return config;
+  const transcript = await canonical(input.transcript_path);
+  if (!within(projects, transcript)) return config;
+  const local = await readJson(path.join(config.stateDir, 'pairs.json'));
+  if (local && (local.version !== 3 || !Array.isArray(local.pairs)
+    || local.pairs.some(pair => pair.claude === input.session_id))) return config;
+
+  let marker;
+  try { for await (const row of rows(transcript)) { marker = row; break; } }
+  catch (error) { if (error.code === 'ENOENT') return config; throw error; }
+  if (marker?.type !== 'session-sync-mirror' || marker.sessionId !== input.session_id
+    || typeof marker.pairId !== 'string' || !/^[\w-]+$/.test(marker.pairId)) return config;
+
+  // Profiles sharing Claude's projects can resume a mirror owned by the physical projects directory.
+  const stateDir = path.join(path.dirname(projects), 'agent-kit', 'sync', path.basename(config.stateDir));
+  const registry = await readJson(path.join(stateDir, 'pairs.json'));
+  if (registry?.version !== 3 || !Array.isArray(registry.pairs)) return config;
+  const mapping = registry.pairs.find(pair => pair.id === marker.pairId && pair.claude === marker.sessionId);
+  if (!mapping) return config;
+  const pair = await readJson(path.join(stateDir, `${mapping.id}.json`));
+  if (pair?.id !== mapping.id || pair.claude?.mirror !== true || pair.codex?.mirror
+    || pair.claude.id !== mapping.claude || pair.codex?.id !== mapping.codex
+    || !pair.claude.file || !pair.claude.cwd || !await samePath(pair.claude.file, transcript)
+    || !await samePath(pair.claude.cwd, config.cwd)) return config;
+  return { ...config, stateDir };
+}
+
 async function withConfig(config, fn) {
   
   for (const key of ['cwd', 'stateDir', 'claudeProjectsDir', 'codexSessionsDir', 'codexHome']) {
@@ -300,7 +329,8 @@ async function createMirror(pair, kind, config, events, options) {
     }
     // Give prompt-only origins a completed assistant leaf before exposing them in resume.
     if (!seed.length || seed.at(-1).type !== 'assistant') {
-      const tail = encode(kind, endpoint, [{ role: 'assistant', key: 'seed', text: 'Paired conversation imported. Ready to continue.' }])[0];
+      const text = events.length ? 'Paired conversation imported. Ready to continue.' : 'Waiting for the first messages from the paired session.';
+      const tail = encode(kind, endpoint, [{ role: 'assistant', key: 'seed', text }])[0];
       tail.parentUuid = seed.at(-1)?.uuid ?? null;
       seed.push(tail);
     }
@@ -422,6 +452,7 @@ async function hook(kind, input, config, options = {}) {
     if (kind === 'claude') {
       const project = await claudeProject(input, config);
       if (!same(project, config.cwd)) config = configuration(project, env);
+      config = await sharedClaudeMirrorConfig(input, config);
     }
   } else if (!same(input.cwd, config.cwd)) return null;
   if (!await activated(config)) return null;
@@ -492,7 +523,9 @@ async function hook(kind, input, config, options = {}) {
         ...(sourceEndpoint.mirror && sourceEndpoint.managed === 'app-server' && (!sourceEndpoint.createdBy || sourceEndpoint.createdBy === 'agent-kit-session-sync')
           ? { source: 'vscode', thread_source: 'user' } : {}) } }] : source;
       if (!pair && (source.some(r => r.type === 'session-sync-mirror') || sourceEndpoint.meta?.session_sync?.mirror
-        || (sourceEndpoint.meta?.originator === 'agent-kit-session-sync' && sourceEndpoint.meta?.thread_source !== 'user'))) throw Error('Orphan mirror: refusing mirror of mirror');
+        || (sourceEndpoint.meta?.originator === 'agent-kit-session-sync' && sourceEndpoint.meta?.thread_source !== 'user'))) {
+        throw Error(`Orphan mirror: refusing mirror of mirror. Session ${input.session_id} has no pair in ${registryFile}`);
+      }
       if (sourceEndpoint.eligible === undefined || sourceEndpoint.eligibilityVersion !== ELIGIBILITY_VERSION
         || (input.hook_event_name === 'SessionStart' && (!cliIdentity || sourceEndpoint.cliIdentity !== cliIdentity))) {
         sourceEndpoint.eligible = await eligible(kind, input, eligibilityRecords, env, options.interactive);

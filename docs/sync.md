@@ -61,6 +61,8 @@ To replace a mirror, close both clients and run `node scripts/agents/recreate-mi
 
 Archives live under `CLAUDE_CONFIG_DIR/agent-kit/sync/<cwd-hash>/`: append-only `.events` files plus per-pair checkpoints with byte offsets, keys and pending references; `pairs.json` contains IDs only. Keep state with its mirrors. Installation/removal is idempotent, backs up changed existing settings, and preserves unrelated hooks, subsequent configuration edits, session files and archives. Uninstall removes hooks only; it does not restore an old configuration over newer edits.
 
+If two Claude profiles share `projects` through a symlink or junction, a verified mirror can resume using the registry next to the physical `projects` directory. Pairs already registered in the current profile take priority.
+
 ## Broker archiving
 
 Codex brokers archive their thread on `/exit`, idle timeout or graceful shutdown, unarchive before resume, and keep failed turns open. `node scripts/agents/archive-broker-sessions.js [--minutes 60] [--state DIR] [--apply]` defaults to a read-only list of old idle broker sessions.
