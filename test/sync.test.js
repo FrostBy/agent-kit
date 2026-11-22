@@ -481,6 +481,44 @@ test('Codex compacted records in the same file replace older context for seeds a
   }
 });
 
+test('a Claude export retains the full Codex compact and adds only the tail that fits', async t => {
+  for (const contextTokens of [600, 1400]) {
+    const f = await fixture(t); f.config.contextTokens = contextTokens;
+    const id = randomUUID(), file = path.join(f.config.codexSessionsDir, `${id}.jsonl`);
+    await fs.mkdir(f.config.codexSessionsDir, { recursive: true });
+    await fs.writeFile(file, jsonl([{ type: 'session_meta', payload: { id, cwd: f.config.cwd, source: 'cli' } }, x('BEFORE-COMPACT')]));
+    await hook('codex', f.input('codex', { id, file }), f.config, opts);
+
+    const first = 'FIRST-COMPACT ' + 'a'.repeat(300), second = 'MAGIC-MEDIA ' + 'я'.repeat(1200) + ' COMPACT-END';
+    await f.append(file, [
+      { type: 'compacted', payload: { message: '', replacement_history: [x(first).payload, {
+        type: 'message', role: 'assistant', content: [{ type: 'output_text', text: second }],
+      }] } },
+      x('OLDER-TAIL ' + 'b'.repeat(1700)), x('LATEST-TAIL'),
+    ]);
+    await hook('codex', f.input('codex', { id, file }), f.config, opts);
+    const pair = await f.pair();
+    if (contextTokens === 1400) {
+      // Simulate an already acknowledged checkpoint written before compacts were kept together.
+      delete pair.codex.active.compactMessages;
+      pair.codex.active.compactKey = pair.codex.active.summary.key;
+      pair.claude.compactAcknowledged = pair.codex.active.compactKey;
+      pair.claude.snapshot = null;
+      await fs.writeFile(path.join(f.config.stateDir, `${pair.id}.json`), JSON.stringify(pair));
+    }
+
+    const input = f.input('claude', pair.claude, 'SessionStart');
+    const result = await hook('claude', input, f.config, opts);
+    const text = result.hookSpecificOutput.additionalContext.split('Current active context from the paired session')[1];
+    assert(text.indexOf(first) >= 0 && text.indexOf(second) > text.indexOf(first));
+    assert.match(text, /\(codex\/assistant\)\nMAGIC-MEDIA/);
+    assert.doesNotMatch(text, /BEFORE-COMPACT|OLDER-TAIL|truncated to fit/);
+    if (contextTokens === 600) assert.doesNotMatch(text, /LATEST-TAIL/);
+    else assert(text.indexOf('LATEST-TAIL') > text.indexOf(second));
+    assert.deepEqual(await hook('claude', input, f.config, opts), result);
+  }
+});
+
 test('Claude sends one block with preview ACK; Codex keeps acknowledged chunks', async t => {
   const { LIMITS } = require('../src/sync/delivery');
   for (const target of ['claude', 'codex']) {

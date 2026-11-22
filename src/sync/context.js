@@ -8,20 +8,31 @@ const clipped = (text, limit) => {
   return new TextDecoder().decode(bytes.subarray(0, Math.max(0, limit - 40))).replace(/\uFFFD$/, '') + '\n[Text truncated to fit sync budget.]';
 };
 const cost = ref => ref.bytes + 120;
+function compactCost(active, usable) {
+  if (!active.summary) return 0;
+  if (active.compactMessages) return cost(active.summary) + active.compactMessages.reduce((sum, ref) => sum + cost(ref), 0);
+  return Math.min(cost(active.summary), Math.floor(usable / 2));
+}
+
 function update(endpoint, ref, event, budget) {
   endpoint.active ||= { tail: [], tailBytes: 0, summary: null, compactKey: null, omitted: false };
   const active = endpoint.active;
   if (event.compact) {
-    active.summary = ref; active.compactKey = ref.key; active.tail = []; active.tailBytes = 0; active.omitted = false;
-  } else { active.tail.push(ref); active.tailBytes += cost(ref); }
-  const available = budget - 1024 - (active.summary ? Math.min(cost(active.summary), Math.floor((budget - 1024) / 2)) : 0);
+    active.summary = ref; active.compactKey = event.codexCompact ? `codex:${ref.key}` : ref.key;
+    if (event.codexCompact) active.compactMessages = [];
+    else delete active.compactMessages;
+    active.tail = []; active.tailBytes = 0; active.omitted = false;
+  } else if (event.codexCompact) active.compactMessages.push(ref);
+  else { active.tail.push(ref); active.tailBytes += cost(ref); }
+  const usable = budget - 1024;
+  const available = usable - compactCost(active, usable);
   while (active.tail.length > 1 && active.tailBytes > available) {
     active.tailBytes -= cost(active.tail.shift()); active.omitted = true;
   }
   if (active.tailBytes > available) active.omitted = true;
 }
 function snapshot(active, budget) {
-  const value = { ...active, tail: [...active.tail], budget };
+  const value = { ...active, ...(active.compactMessages && { compactMessages: [...active.compactMessages] }), tail: [...active.tail], budget };
   value.key = createHash('sha256').update(JSON.stringify(value)).digest('hex');
   return value;
 }
@@ -44,11 +55,12 @@ async function materialize(journal, active, budget) {
     return { ...event, text, ...(tool ? { tool } : {}), ...(shell ? { shell } : {}) };
   }
   try {
-    if (active.summary) events.push(await read(active.summary, Math.min(cost(active.summary), Math.floor(usable / 2))));
+    if (active.summary) events.push(await read(active.summary, active.compactMessages ? cost(active.summary) : compactCost(active, usable)));
+    for (const ref of active.compactMessages || []) events.push(await read(ref, cost(ref)));
     const tail = [...active.tail];
     let total = tail.reduce((sum, ref) => sum + cost(ref), 0);
     let omitted = active.omitted || total > left - 200;
-    while (tail.length > 1 && total > left - 200) total -= cost(tail.shift());
+    while (tail.length > (active.compactMessages ? 0 : 1) && total > left - 200) total -= cost(tail.shift());
     if (omitted) {
       events.push({ key: 'seed', role: 'user', text: OMITTED }); left -= Buffer.byteLength(OMITTED) + 120;
     }

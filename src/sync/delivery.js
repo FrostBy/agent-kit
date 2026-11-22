@@ -51,7 +51,8 @@ function acknowledge(endpoint, marks) {
   endpoint.inflight = (endpoint.inflight || []).filter(item => !marks.has(item.key));
 }
 async function output(kind, endpoint, journal, budget, context) {
-  const limit = Math.min(LIMITS[kind], budget), blocks = [], inflight = [];
+  const fullCompact = kind === 'claude' && Boolean(endpoint.snapshot?.compactMessages);
+  const limit = fullCompact ? LIMITS[kind] : Math.min(LIMITS[kind], budget), blocks = [], inflight = [];
   const claudeKey = kind === 'claude' ? hash(JSON.stringify([endpoint.snapshot || endpoint.pending, limit])) : null;
   let used = 0;
   async function block(text, identity, position, descriptor) {

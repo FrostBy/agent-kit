@@ -159,9 +159,10 @@ function extract(kind, records, sessionId, context = {}) {
     throw Error('Codex rollback requires reconciliation; refusing to export reverted turns');
   }
   const result = [], calls = new Map(context.calls || []);
-  const push = (id, role, text, compact = false) => {
+  const push = (id, role, text, compact = false, codexCompact = false) => {
     if (!text || (!compact && text.includes(MARK))) return;
-    result.push({ key: digest(`${kind}:${sessionId}:${id}:${text}`), origin: kind, role, text, ...(context.model ? { model: context.model } : {}), ...(compact ? { compact: true } : {}) });
+    result.push({ key: digest(`${kind}:${sessionId}:${id}:${text}`), origin: kind, role, text, ...(context.model ? { model: context.model } : {}),
+      ...(compact ? { compact: true } : {}), ...(codexCompact ? { codexCompact: true } : {}) });
   };
   const pushTool = (id, text, name, input, output, details = {}) => {
     const before = result.length; push(id, 'assistant', text);
@@ -185,12 +186,13 @@ function extract(kind, records, sessionId, context = {}) {
       if (!Array.isArray(history)) throw Error('Compaction missing replacement_history');
       const visible = history.filter(item => item.type === 'message' && ['user', 'assistant'].includes(item.role))
         .map(item => ({ role: item.role, text: item.role === 'user' ? userText('codex', {}, item) : textBlocks(item.content) })).filter(item => item.text);
-      const summary = typeof p.message === 'string' && p.message ? cleanText('codex', p.message) : visible.shift()?.text;
+      const summary = typeof p.message === 'string' ? cleanText('codex', p.message) : '';
+      const first = summary ? { role: 'user', text: summary } : visible.shift();
       calls.clear();
       delete context.userShell;
       const compactId = p.id ?? index;
-      push(compactId, 'user', summary || '[Compacted context: no visible summary.]', true);
-      for (const [n, item] of visible.entries()) if (item.text !== summary) push(`${compactId}:replacement:${n}`, item.role, item.text);
+      push(compactId, first?.role || 'user', first?.text || '[Compacted context: no visible summary.]', true, true);
+      for (const [n, item] of visible.entries()) push(`${compactId}:replacement:${n}`, item.role, item.text, false, true);
       continue;
     }
     if (kind === 'claude') {
@@ -479,8 +481,10 @@ async function hook(kind, input, config, options = {}) {
         const clientRoot = await canonical(client === 'claude' ? config.claudeProjectsDir : config.codexSessionsDir);
         const relative = path.relative(clientRoot, await canonical(endpoint.file));
         if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw Error('Transcript outside configured client directory');
+        const legacyCompact = client === 'codex' && !endpoint.mirror
+          && endpoint.active?.compactKey && !endpoint.active.compactMessages;
         let read;
-        try { read = await incremental(endpoint.file, endpoint.active ? endpoint.cursor : undefined); }
+        try { read = await incremental(endpoint.file, endpoint.active && !legacyCompact ? endpoint.cursor : undefined); }
         catch (e) {
           if (e.code === 'ENOENT' && kind === 'claude' && client === 'codex' && endpoint.mirror && endpoint.seeded
             && endpoint.managed === 'app-server' && (!endpoint.createdBy || endpoint.createdBy === 'agent-kit-session-sync')) {
