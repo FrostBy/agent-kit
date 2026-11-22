@@ -1094,130 +1094,39 @@ index f4fa6ce..9cbb65c 100644
          let follow_transcript = match &input_result {
              // Opening settings is not a request to leave the current reading anchor.
              // Inline commands still follow so their output (including usage errors) is visible.
-diff --git a/codex-rs/tui/src/chatwidget/interaction.rs b/codex-rs/tui/src/chatwidget/interaction.rs
-index dfca5f0..79c056d 100644
---- a/codex-rs/tui/src/chatwidget/interaction.rs
-+++ b/codex-rs/tui/src/chatwidget/interaction.rs
-@@ -156,6 +156,18 @@ impl ChatWidget {
-         key_event: KeyEvent,
-         activation_key: Option<crate::key_hint::KeyBinding>,
-     ) -> KeyEventAction {
-+        if key_event.kind == KeyEventKind::Press
-+            && !self
-+                .bottom_pane
-+                .keymap()
-+                .composer
-+                .submit
-+                .is_pressed(key_event)
-+            && self.cancel_pending_dictation_submission()
-+            && key_hint::plain(KeyCode::Esc).is_press(key_event)
-+        {
-+            return KeyEventAction::None;
-+        }
-         if self.handle_quick_dial_menu(key_event) {
-             return KeyEventAction::None;
-         }
-@@ -348,29 +360,38 @@ impl ChatWidget {
-                 }
-             }
-             _ => {
--                let had_modal_or_popup = !self.bottom_pane.no_modal_or_popup_active();
--                let should_pause_active_goal =
--                    self.bottom_pane.should_interrupt_running_task(key_event);
--                let input_result = self
--                    .bottom_pane
--                    .handle_key_event_with_activation_key(key_event, activation_key);
--                if matches!(
--                    input_result,
--                    InputResult::None | InputResult::ParentOwnedInputBlocked
--                ) {
--                    self.refresh_startup_recovery();
-+                if !self.wait_for_dictation_on_submit(key_event) {
-+                    self.handle_composer_key_event(key_event, activation_key);
-                 }
--                crate::startup_recovery::submitted(&input_result);
--                self.sync_backend_banner_view();
--                if should_pause_active_goal {
--                    self.pause_active_goal_for_interrupt();
--                }
--                self.handle_composer_input_result(input_result, had_modal_or_popup);
-             }
-         }
-         KeyEventAction::None
-     }
- 
-+    pub(super) fn handle_composer_key_event(
-+        &mut self,
-+        key_event: KeyEvent,
-+        activation_key: Option<crate::key_hint::KeyBinding>,
-+    ) {
-+        let had_modal_or_popup = !self.bottom_pane.no_modal_or_popup_active();
-+        let should_pause_active_goal = self.bottom_pane.should_interrupt_running_task(key_event);
-+        let input_result = self
-+            .bottom_pane
-+            .handle_key_event_with_activation_key(key_event, activation_key);
-+        if matches!(
-+            input_result,
-+            InputResult::None | InputResult::ParentOwnedInputBlocked
-+        ) {
-+            self.refresh_startup_recovery();
-+        }
-+        crate::startup_recovery::submitted(&input_result);
-+        self.sync_backend_banner_view();
-+        if should_pause_active_goal {
-+            self.pause_active_goal_for_interrupt();
-+        }
-+        self.handle_composer_input_result(input_result, had_modal_or_popup);
-+    }
-+
-     /// Attach a local image, deferring model validation while the draft awaits its destination.
-     ///
-     /// Ordinary paste still checks the active model. Handoff only retains the attachment locally;
-@@ -397,6 +418,7 @@ impl ChatWidget {
-     }
- 
-     pub(crate) fn apply_external_edit(&mut self, text: String) {
-+        self.cancel_pending_dictation_submission();
-         self.bottom_pane.apply_external_edit(text);
-         self.refresh_startup_recovery();
-         self.request_redraw();
 diff --git a/codex-rs/tui/src/chatwidget/realtime.rs b/codex-rs/tui/src/chatwidget/realtime.rs
-index cdffddc..35ede4c 100644
+index cdffddc..bea843d 100644
 --- a/codex-rs/tui/src/chatwidget/realtime.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime.rs
-@@ -21,6 +21,7 @@ use crate::app_event::RealtimeWebrtcStartupFailure;
- use crate::bottom_pane::VoiceStripPhase;
- use crate::bottom_pane::VoiceStripState;
- use crate::history_cell;
-+use crate::key_hint::KeyBindingListExt;
- use crate::motion::MotionMode;
- use codex_app_server_protocol::ThreadItemPayload;
- use codex_app_server_protocol::UserInput;
-@@ -29,6 +30,8 @@ use codex_protocol::models::MessagePhase;
- use codex_realtime_webrtc::RealtimeWebrtcSession;
- use codex_realtime_webrtc::RealtimeWebrtcSessionHandle;
- use codex_realtime_webrtc::StartedRealtimeWebrtcSession;
-+use crossterm::event::KeyEvent;
-+use crossterm::event::KeyEventKind;
- use futures::future::AbortHandle;
- use std::collections::HashMap;
- use std::collections::VecDeque;
-@@ -59,6 +62,8 @@ const MAX_SPEAKABLE_FINAL_TOKENS: usize = 990;
- const AUDIO_METER_SEGMENTS: usize = 5;
- const AUDIO_METER_NOISE_FLOOR: u16 = 512;
- const AUDIO_METER_FULL_SCALE: u16 = 8192;
-+const DICTATION_SUBMIT_TIMEOUT: Duration = Duration::from_secs(2);
-+const DICTATION_RECENT_AUDIO: Duration = Duration::from_millis(900);
- const MAX_REALTIME_AUDIO_METER_FRAMES: usize = 12;
- const MICROPHONE_METER_INTERVAL: Duration = Duration::from_millis(100);
- const SPEAKER_ACTIVITY_HOLD: Duration = Duration::from_millis(500);
-@@ -136,12 +141,25 @@ enum StartupRetry {
+@@ -136,12 +136,45 @@ enum StartupRetry {
      Used,
  }
  
-+struct DictationSubmission {
-+    key: KeyEvent,
-+    deadline: Instant,
++fn dictation_prefix_end(text: &str, partial: &str) -> Option<usize> {
++    if text.starts_with(partial) {
++        return Some(partial.len());
++    }
++    // A final may correct case and punctuation, including inside a prefix already sent.
++    let mut expected = partial
++        .chars()
++        .filter(|character| character.is_alphanumeric())
++        .flat_map(char::to_lowercase)
++        .peekable();
++    expected.peek()?;
++    for (offset, character) in text
++        .char_indices()
++        .filter(|(_, character)| character.is_alphanumeric())
++    {
++        for actual in character.to_lowercase() {
++            if expected.next() != Some(actual) {
++                return None;
++            }
++        }
++        if expected.peek().is_none() {
++            return Some(offset + character.len_utf8());
++        }
++    }
++    None
 +}
 +
  #[derive(Default)]
@@ -1231,13 +1140,11 @@ index cdffddc..35ede4c 100644
 +    dictation_partial: String,
 +    dictation_new_segment: bool,
 +    dictation_sent_bytes: usize,
-+    dictation_last_audio_at: Option<Instant>,
-+    dictation_submission: Option<DictationSubmission>,
 +    speaker_muted: bool,
      attempt_id: u64,
      thread_id: Option<ThreadId>,
      pub(super) handle: Option<RealtimeWebrtcSessionHandle>,
-@@ -186,6 +204,10 @@ pub(super) struct RealtimeConversationUiState {
+@@ -186,6 +219,10 @@ pub(super) struct RealtimeConversationUiState {
  }
  
  impl RealtimeConversationUiState {
@@ -1248,7 +1155,7 @@ index cdffddc..35ede4c 100644
      pub(super) fn live_transcript_cells(&self) -> impl Iterator<Item = &Box<dyn HistoryCell>> {
          // Keep the user above the reply even when their last packets interleave.
          let cells = if self.transcript_role.as_deref() == Some("user") {
-@@ -262,6 +284,22 @@ impl ChatWidget {
+@@ -262,6 +299,22 @@ impl ChatWidget {
      }
  
      pub(crate) fn toggle_realtime_conversation(&mut self) {
@@ -1271,7 +1178,7 @@ index cdffddc..35ede4c 100644
          if self.realtime_conversation.phase == RealtimeConversationPhase::Stopping {
              self.realtime_conversation.startup_retry = StartupRetry::Used;
              self.add_info_message(
-@@ -309,6 +347,7 @@ impl ChatWidget {
+@@ -309,6 +362,7 @@ impl ChatWidget {
  
          self.session_telemetry
              .counter("codex.voice.session.start", /*inc*/ 1, &[]);
@@ -1279,7 +1186,7 @@ index cdffddc..35ede4c 100644
          self.start_realtime_conversation(thread_id);
      }
  
-@@ -444,6 +483,9 @@ impl ChatWidget {
+@@ -444,6 +498,9 @@ impl ChatWidget {
              self.on_realtime_error(message, cause);
              return;
          }
@@ -1289,7 +1196,7 @@ index cdffddc..35ede4c 100644
          self.realtime_conversation.handle = Some(offer.handle);
          self.update_realtime_footer();
          self.refresh_terminal_title();
-@@ -605,10 +647,23 @@ impl ChatWidget {
+@@ -605,10 +662,23 @@ impl ChatWidget {
          self.update_realtime_footer();
          self.frame_requester
              .schedule_frame_in(MICROPHONE_METER_INTERVAL);
@@ -1317,7 +1224,7 @@ index cdffddc..35ede4c 100644
      }
  
      pub(crate) fn is_current_realtime_attempt(
-@@ -624,7 +679,104 @@ impl ChatWidget {
+@@ -624,7 +694,18 @@ impl ChatWidget {
              && self.realtime_conversation.latest_input_was_voice
      }
  
@@ -1329,92 +1236,6 @@ index cdffddc..35ede4c 100644
 +        }
 +    }
 +
-+    fn can_submit_dictation(&self, key: KeyEvent) -> bool {
-+        let voice = &self.realtime_conversation;
-+        voice.dictation
-+            && voice.phase == RealtimeConversationPhase::Active
-+            && voice.thread_id == self.thread_id()
-+            && !self.blocks_direct_input
-+            && self.bottom_pane.no_modal_or_popup_active()
-+            && matches!(
-+                self.external_editor_state(),
-+                super::ExternalEditorState::Closed
-+            )
-+            && self.bottom_pane.keymap().composer.submit.is_pressed(key)
-+            && !self
-+                .bottom_pane
-+                .composer_text()
-+                .trim_start()
-+                .starts_with(['/', '!'])
-+    }
-+
-+    pub(super) fn wait_for_dictation_on_submit(&mut self, key: KeyEvent) -> bool {
-+        if key.kind != KeyEventKind::Press || !self.can_submit_dictation(key) {
-+            return false;
-+        }
-+        if self.cancel_pending_dictation_submission() {
-+            return false;
-+        }
-+        let voice = &mut self.realtime_conversation;
-+        let now = Instant::now();
-+        if voice.dictation_partial[voice.dictation_sent_bytes..]
-+            .trim()
-+            .is_empty()
-+            && !voice
-+                .dictation_last_audio_at
-+                .is_some_and(|last| now.saturating_duration_since(last) < DICTATION_RECENT_AUDIO)
-+        {
-+            return false;
-+        }
-+        voice.dictation_submission = Some(DictationSubmission {
-+            key,
-+            deadline: now + DICTATION_SUBMIT_TIMEOUT,
-+        });
-+        self.update_realtime_footer();
-+        self.frame_requester
-+            .schedule_frame_in(DICTATION_SUBMIT_TIMEOUT);
-+        true
-+    }
-+
-+    pub(super) fn cancel_pending_dictation_submission(&mut self) -> bool {
-+        if self
-+            .realtime_conversation
-+            .dictation_submission
-+            .take()
-+            .is_none()
-+        {
-+            return false;
-+        }
-+        self.update_realtime_footer();
-+        true
-+    }
-+
-+    fn expire_dictation_submission(&mut self, now: Instant) {
-+        if self
-+            .realtime_conversation
-+            .dictation_submission
-+            .as_ref()
-+            .is_some_and(|submission| now >= submission.deadline)
-+        {
-+            self.submit_pending_dictation();
-+        }
-+    }
-+
-+    fn finish_dictation_submission(&mut self) {
-+        self.realtime_conversation.dictation_last_audio_at = None;
-+        self.submit_pending_dictation();
-+    }
-+
-+    fn submit_pending_dictation(&mut self) {
-+        let Some(submission) = self.realtime_conversation.dictation_submission.take() else {
-+            return;
-+        };
-+        self.update_realtime_footer();
-+        if self.can_submit_dictation(submission.key) {
-+            self.handle_composer_key_event(submission.key, /*activation_key*/ None);
-+        }
-+    }
-+
      pub(super) fn note_realtime_typed_input(&mut self, text: &str) {
 +        if self.realtime_conversation.dictation {
 +            return;
@@ -1422,7 +1243,7 @@ index cdffddc..35ede4c 100644
          self.invalidate_realtime_voice_input();
          if self.realtime_conversation.phase == RealtimeConversationPhase::Active {
              self.realtime_conversation.pending_typed_input = Some(text.to_string());
-@@ -1315,6 +1467,37 @@ impl ChatWidget {
+@@ -1315,6 +1396,37 @@ impl ChatWidget {
      }
  
      pub(super) fn on_realtime_transcript_delta(&mut self, role: String, delta: String) {
@@ -1460,7 +1281,7 @@ index cdffddc..35ede4c 100644
          if self.realtime_conversation.phase == RealtimeConversationPhase::Inactive
              && !self.realtime_conversation.recover_late_transcripts
          {
-@@ -1458,6 +1641,47 @@ impl ChatWidget {
+@@ -1458,6 +1570,55 @@ impl ChatWidget {
      }
  
      pub(super) fn on_realtime_transcript_done(&mut self, role: String, mut text: String) {
@@ -1473,23 +1294,32 @@ index cdffddc..35ede4c 100644
 +                let voice = &mut self.realtime_conversation;
 +                if !text.trim().is_empty() {
 +                    voice.dictation_retry_used = false;
++                    let matches_partial =
++                        dictation_prefix_end(&text, &voice.dictation_partial).is_some();
 +                    if voice.dictation_partial.is_empty()
-+                        || (voice.dictation_new_segment
-+                            && !text.starts_with(&voice.dictation_partial))
++                        || (voice.dictation_new_segment && !matches_partial)
 +                    {
 +                        voice.dictation_partial.clear();
 +                        voice.dictation_sent_bytes = 0;
 +                        voice.dictation_new_segment = false;
 +                        self.bottom_pane.append_dictation(text.trim(), true);
-+                        self.finish_dictation_submission();
-+                    } else if text.starts_with(&voice.dictation_partial) {
++                    } else if matches_partial
++                        && let Some(final_sent_end) = dictation_prefix_end(
++                            &text,
++                            &voice.dictation_partial[..voice.dictation_sent_bytes],
++                        )
++                    {
 +                        let partial = std::mem::take(&mut voice.dictation_partial);
 +                        let sent = std::mem::take(&mut voice.dictation_sent_bytes);
 +                        if sent == 0 {
-+                            self.bottom_pane.finish_dictation(&partial, &text);
++                            self.bottom_pane
++                                .finish_dictation(partial.trim_start(), text.trim_start());
 +                        } else {
 +                            let visible = partial[sent..].trim_start();
-+                            let remainder = text[sent..].trim_start();
++                            let remainder =
++                                text[final_sent_end..].trim_start_matches(|character: char| {
++                                    character.is_whitespace() || ",.;:!?…".contains(character)
++                                });
 +                            if visible.is_empty() {
 +                                if !remainder.is_empty() {
 +                                    self.bottom_pane.append_dictation(remainder, true);
@@ -1498,7 +1328,6 @@ index cdffddc..35ede4c 100644
 +                                self.bottom_pane.finish_dictation(visible, remainder);
 +                            }
 +                        }
-+                        self.finish_dictation_submission();
 +                    }
 +                    // A delayed V3 final can belong to an older phrase; keep the visible draft.
 +                }
@@ -1508,20 +1337,19 @@ index cdffddc..35ede4c 100644
          if matches!(
              self.realtime_conversation.phase,
              RealtimeConversationPhase::Inactive | RealtimeConversationPhase::Stopping
-@@ -1688,6 +1912,12 @@ impl ChatWidget {
+@@ -1688,6 +1849,11 @@ impl ChatWidget {
      }
  
      fn finish_realtime_partial_transcripts(&mut self) {
 +        if self.realtime_conversation.dictation {
 +            self.realtime_conversation.dictation_partial.clear();
 +            self.realtime_conversation.dictation_sent_bytes = 0;
-+            self.realtime_conversation.dictation_submission = None;
 +            return;
 +        }
          if let Some((role, text)) = self.realtime_conversation.interleaved_transcript.take() {
              self.realtime_conversation.interleaved_transcript_cell = None;
              self.on_realtime_transcript_done(role, text);
-@@ -1756,10 +1986,22 @@ impl ChatWidget {
+@@ -1756,10 +1922,22 @@ impl ChatWidget {
          {
              self.record_realtime_failure(cause);
          }
@@ -1544,7 +1372,7 @@ index cdffddc..35ede4c 100644
      pub(super) fn on_realtime_conversation_closed(&mut self, reason: Option<String>) {
          self.stop_if_session_locked();
          if self.realtime_conversation.phase == RealtimeConversationPhase::Inactive {
-@@ -1775,6 +2017,10 @@ impl ChatWidget {
+@@ -1775,6 +1953,10 @@ impl ChatWidget {
              == RealtimeConversationPhase::Starting
              && self.realtime_conversation.startup_retry == StartupRetry::Available
              && reason.as_deref() == Some("transport_closed");
@@ -1555,7 +1383,7 @@ index cdffddc..35ede4c 100644
          if self.realtime_conversation.phase == RealtimeConversationPhase::Stopping
              && reason.as_deref() != Some("requested")
          {
-@@ -1785,8 +2031,10 @@ impl ChatWidget {
+@@ -1785,8 +1967,10 @@ impl ChatWidget {
          self.restore_all_undelivered_realtime_speech();
          self.finish_realtime_partial_transcripts();
          let muted = self.realtime_conversation.microphone_muted;
@@ -1567,7 +1395,7 @@ index cdffddc..35ede4c 100644
              thread_id.filter(|id| Some(*id) == self.thread_id())
          } else {
              None
-@@ -1811,6 +2059,9 @@ impl ChatWidget {
+@@ -1811,6 +1995,9 @@ impl ChatWidget {
              // The old backend is closed. A late peer result belongs to its attempt ID.
              self.realtime_conversation.startup_retry = StartupRetry::Used;
              self.realtime_conversation.microphone_muted = muted;
@@ -1577,7 +1405,7 @@ index cdffddc..35ede4c 100644
              if retry_after_early_close {
                  self.add_info_message(
                      "Voice connection closed during startup. Retrying once.".into(),
-@@ -1824,7 +2075,11 @@ impl ChatWidget {
+@@ -1824,7 +2011,11 @@ impl ChatWidget {
              && reason != "error"
              && !(failed && reason == "requested")
          {
@@ -1591,23 +1419,20 @@ index cdffddc..35ede4c 100644
                  self.add_realtime_error(message);
              } else {
 diff --git a/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs b/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
-index e299500..cae70ce 100644
+index e299500..9222050 100644
 --- a/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime/recording_controls.rs
-@@ -28,7 +28,12 @@ impl ChatWidget {
+@@ -28,6 +28,9 @@ impl ChatWidget {
          self.realtime_conversation.microphone_muted = muted;
          self.realtime_conversation.microphone_level = 0;
          self.realtime_conversation.microphone_intensity = 0;
 +        if self.realtime_conversation.dictation && !muted {
 +            self.realtime_conversation.dictation_new_segment = true;
 +        }
-+        self.cancel_pending_dictation_submission();
          if muted {
-+            self.realtime_conversation.dictation_last_audio_at = None;
              self.realtime_conversation.microphone_history = VoiceAmplitudeHistory::default();
              for (microphone, _) in &mut self.realtime_conversation.audio_meter_history {
-                 *microphone = 0;
-@@ -59,6 +64,19 @@ impl ChatWidget {
+@@ -59,6 +62,19 @@ impl ChatWidget {
              }
      }
  
@@ -1627,7 +1452,7 @@ index e299500..cae70ce 100644
      pub(super) fn release_realtime_speaker(&mut self) {
          let acknowledged = self
              .realtime_conversation
-@@ -66,9 +84,7 @@ impl ChatWidget {
+@@ -66,9 +82,7 @@ impl ChatWidget {
              .take()
              .is_some();
          self.realtime_conversation.speaker_suppression_generation = None;
@@ -1638,7 +1463,7 @@ index e299500..cae70ce 100644
          if acknowledged {
              self.update_realtime_footer();
          }
-@@ -110,8 +126,17 @@ impl ChatWidget {
+@@ -110,8 +124,17 @@ impl ChatWidget {
      pub(super) fn suppress_realtime_speaker(&mut self) {
          self.realtime_conversation.speaker_suppression_generation =
              Some(self.realtime_conversation.input_generation);
@@ -1657,7 +1482,7 @@ index e299500..cae70ce 100644
          }
          self.realtime_conversation.speaker_level = 0;
          self.realtime_conversation.speaker_intensity = 0;
-@@ -119,7 +144,6 @@ impl ChatWidget {
+@@ -119,7 +142,6 @@ impl ChatWidget {
              *speaker = 0;
          }
          self.realtime_conversation.speaker_active_until = None;
@@ -1665,25 +1490,7 @@ index e299500..cae70ce 100644
      }
  
      pub(super) fn resume_realtime_speaker_for(&mut self, role: &str, text: &str) {
-@@ -136,6 +160,7 @@ impl ChatWidget {
-     }
- 
-     pub(crate) fn refresh_realtime_microphone_level(&mut self) {
-+        self.expire_dictation_submission(Instant::now());
-         if !matches!(
-             self.realtime_conversation.phase,
-             RealtimeConversationPhase::Starting | RealtimeConversationPhase::Active
-@@ -182,6 +207,9 @@ impl ChatWidget {
-             microphone_peak
-         };
-         let microphone_level = audio_meter_level(microphone_peak);
-+        if self.realtime_conversation.dictation && microphone_level > 0 {
-+            self.realtime_conversation.dictation_last_audio_at = Some(now);
-+        }
-         let speaker_level = audio_meter_level(speaker_peak);
-         let microphone_intensity = audio_meter_intensity(microphone_peak);
-         let speaker_intensity = audio_meter_intensity(speaker_peak);
-@@ -252,7 +280,19 @@ impl ChatWidget {
+@@ -252,7 +274,17 @@ impl ChatWidget {
          }
  
          let activity = if self.realtime_conversation.phase == RealtimeConversationPhase::Starting {
@@ -1694,9 +1501,7 @@ index e299500..cae70ce 100644
 +                "connecting"
 +            }
 +        } else if self.realtime_conversation.dictation {
-+            if self.realtime_conversation.dictation_submission.is_some() {
-+                "finalizing transcript"
-+            } else if self.realtime_conversation.microphone_muted {
++            if self.realtime_conversation.microphone_muted {
 +                "paused"
 +            } else {
 +                "recording"
@@ -1704,7 +1509,7 @@ index e299500..cae70ce 100644
          } else if self.realtime_conversation.microphone_muted {
              "muted"
          } else if self
-@@ -273,6 +313,10 @@ impl ChatWidget {
+@@ -273,6 +305,10 @@ impl ChatWidget {
          };
          self.bottom_pane.set_voice_strip(Some(VoiceStripState {
              mute_hint: self.chat_keymap.voice_mute_hint(),
@@ -1823,23 +1628,11 @@ index 473941e..b763134 100644
     mic ▁▁▄▄▄▄  codex ▁▁▄▄▄▄
  
  › Ask Codex to do anything
-diff --git a/codex-rs/tui/src/chatwidget/realtime_navigation.rs b/codex-rs/tui/src/chatwidget/realtime_navigation.rs
-index 6dbaaa1..33a43c8 100644
---- a/codex-rs/tui/src/chatwidget/realtime_navigation.rs
-+++ b/codex-rs/tui/src/chatwidget/realtime_navigation.rs
-@@ -17,6 +17,7 @@ impl ChatWidget {
-     }
- 
-     pub(crate) fn park_voice(&mut self) {
-+        self.cancel_pending_dictation_submission();
-         self.app_event_tx.voice_only.store(true, Ordering::Relaxed);
-         self.set_queue_autosend_suppressed(/*suppressed*/ true);
-         self.stop_rate_limit_poller();
 diff --git a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs b/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
-index 7a3b2a0..c60c982 100644
+index 7a3b2a0..48204b0 100644
 --- a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
-@@ -29,6 +29,237 @@ fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question:
+@@ -29,6 +29,206 @@ fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question:
      );
  }
  
@@ -1891,23 +1684,27 @@ index 7a3b2a0..c60c982 100644
 +#[tokio::test]
 +async fn sending_dictation_keeps_recording_without_repeating_the_sent_prefix() {
 +    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-+    let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
-+    activate_voice(&mut chat);
-+    chat.realtime_conversation.dictation = true;
++    for muted in [false, true] {
++        let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
++        activate_voice(&mut chat);
++        chat.realtime_conversation.dictation = true;
++        chat.on_realtime_transcript_delta("user".into(), "первое сообщение".into());
++        chat.realtime_conversation.microphone_muted = muted;
 +
-+    chat.on_realtime_transcript_delta("user".into(), "First message".into());
-+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-+    assert!(ops.try_recv().is_err());
-+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-+    assert!(!chat.realtime_conversation.microphone_muted);
-+    assert_eq!(chat.bottom_pane.composer_text(), "");
-+    assert!(ops.try_recv().is_ok());
++        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
++        let AppCommand::UserTurn { items, .. } = ops.try_recv().unwrap() else {
++            panic!("Enter should send the draft before the final transcript arrives");
++        };
++        assert!(matches!(&items[..], [UserInput::Text { text, .. }] if text == "первое сообщение"));
++        assert_eq!(chat.realtime_conversation.microphone_muted, muted);
++        assert_eq!(chat.bottom_pane.composer_text(), "");
 +
-+    chat.on_realtime_transcript_delta("user".into(), " second".into());
-+    assert_eq!(chat.bottom_pane.composer_text(), "second");
-+    chat.on_realtime_transcript_done("user".into(), "First message second phrase.".into());
-+    assert_eq!(chat.bottom_pane.composer_text(), "second phrase.");
-+    assert!(ops.try_recv().is_err());
++        chat.on_realtime_transcript_delta("user".into(), " второе".into());
++        assert_eq!(chat.bottom_pane.composer_text(), "второе");
++        chat.on_realtime_transcript_done("user".into(), "Первое сообщение, второе дальше.".into());
++        assert_eq!(chat.bottom_pane.composer_text(), "второе дальше.");
++        assert!(ops.try_recv().is_err());
++    }
 +}
 +
 +#[tokio::test]
@@ -1922,7 +1719,6 @@ index 7a3b2a0..c60c982 100644
 +    for (fragment, sent_immediately) in [(&first, true), (&second, false)] {
 +        chat.on_realtime_transcript_delta("user".into(), fragment.clone());
 +        assert_eq!(chat.bottom_pane.composer_text(), fragment.trim_start());
-+        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 +        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 +        assert_eq!(ops.try_recv().is_ok(), sent_immediately);
 +        assert_eq!(chat.bottom_pane.composer_text(), "");
@@ -1939,57 +1735,23 @@ index 7a3b2a0..c60c982 100644
 +}
 +
 +#[tokio::test]
-+async fn enter_waits_for_the_final_dictation_words_before_sending() {
++async fn dictation_keeps_final_case_and_punctuation_before_enter() {
 +    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 +    let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
 +    activate_voice(&mut chat);
 +    chat.realtime_conversation.dictation = true;
++    chat.bottom_pane.append_dictation("Предыдущая фраза.", true);
++    chat.on_realtime_transcript_delta("user".into(), " допиши сюда".into());
++    chat.on_realtime_transcript_done("user".into(), "Допиши сюда.".into());
 +
-+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-+    chat.on_realtime_transcript_delta("user".into(), "Check the".into());
-+    chat.handle_key_event(enter);
-+    assert!(render_bottom_popup(&chat, 80).contains("finalizing transcript"));
-+    assert_eq!(chat.bottom_pane.composer_text(), "Check the");
-+    assert!(ops.try_recv().is_err());
-+
-+    chat.on_realtime_transcript_delta("user".into(), " last".into());
-+    chat.on_realtime_transcript_done("user".into(), "Check the last two words.".into());
++    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 +    let AppCommand::UserTurn { items, .. } = ops.try_recv().unwrap() else {
-+        panic!("the final transcript should result in a normal text submission");
++        panic!("a finalized draft should send immediately");
 +    };
 +    assert!(
-+        matches!(&items[..], [UserInput::Text { text, .. }] if text == "Check the last two words.")
++        matches!(&items[..], [UserInput::Text { text, .. }] if text == "Предыдущая фраза. Допиши сюда.")
 +    );
 +    assert_eq!(chat.bottom_pane.composer_text(), "");
-+    assert!(!chat.realtime_conversation.microphone_muted);
-+    chat.on_realtime_transcript_delta("user".into(), "New draft".into());
-+    assert_eq!(chat.bottom_pane.composer_text(), "New draft");
-+    assert!(ops.try_recv().is_err());
-+}
-+
-+#[tokio::test]
-+async fn dictation_timeout_sends_the_current_draft_once() {
-+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-+    let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
-+    activate_voice(&mut chat);
-+    chat.realtime_conversation.dictation = true;
-+    chat.on_realtime_transcript_done("user".into(), "Already finalized.".into());
-+
-+    let now = std::time::Instant::now();
-+    chat.refresh_realtime_audio_meters(now, || (4096, 0));
-+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-+    chat.handle_key_event(enter);
-+    assert!(ops.try_recv().is_err());
-+    chat.expire_dictation_submission(now + super::super::DICTATION_SUBMIT_TIMEOUT * 2);
-+    let AppCommand::UserTurn { items, .. } = ops.try_recv().unwrap() else {
-+        panic!("the timeout should submit the current draft");
-+    };
-+    assert!(matches!(&items[..], [UserInput::Text { text, .. }] if text == "Already finalized."));
-+    assert_eq!(chat.bottom_pane.composer_text(), "");
-+
-+    chat.on_realtime_transcript_done("user".into(), "Late words.".into());
-+    assert_eq!(chat.bottom_pane.composer_text(), "Late words.");
-+    assert!(ops.try_recv().is_err());
 +}
 +
 +#[tokio::test]
@@ -2078,10 +1840,10 @@ index 7a3b2a0..c60c982 100644
  async fn typed_turn_remains_a_normal_text_response_while_voice_is_active() {
      let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
 diff --git a/codex-rs/tui/src/chatwidget/realtime_tests/lifecycle.rs b/codex-rs/tui/src/chatwidget/realtime_tests/lifecycle.rs
-index 8ff6abc..2d5dec6 100644
+index 8ff6abc..b6a8baf 100644
 --- a/codex-rs/tui/src/chatwidget/realtime_tests/lifecycle.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime_tests/lifecycle.rs
-@@ -264,6 +264,76 @@ async fn voice_becomes_active_only_after_backend_and_current_peer_are_ready() {
+@@ -264,6 +264,75 @@ async fn voice_becomes_active_only_after_backend_and_current_peer_are_ready() {
      );
  }
  
@@ -2099,7 +1861,6 @@ index 8ff6abc..2d5dec6 100644
 +        ));
 +        for text in ["first", " second"] {
 +            chat.on_realtime_transcript_delta("user".into(), text.into());
-+            chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 +            chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 +            assert_eq!(chat.bottom_pane.composer_text(), "");
 +        }
