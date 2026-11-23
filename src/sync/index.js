@@ -131,20 +131,27 @@ async function readJson(file, fallback) {
   catch (e) { if (e.code === 'ENOENT') return fallback; throw e; }
 }
 
-async function* rows(file) {
-  const decoder = new TextDecoder('utf-8', { fatal: true });
+async function* completeLines(stream) {
   let fragments = [];
-  for await (const chunk of createReadStream(file)) {
+  for await (const chunk of stream) {
     let start = 0, end;
     while ((end = chunk.indexOf(10, start)) !== -1) {
       fragments.push(chunk.subarray(start, end));
-      const line = decoder.decode(fragments.length === 1 ? fragments[0] : Buffer.concat(fragments));
+      const line = fragments.length === 1 ? fragments[0] : Buffer.concat(fragments);
       fragments = [];
-      if (line) yield JSON.parse(line);
+      yield line;
       start = end + 1;
     }
     // A writer may still be flushing its last record; never consume a partial line.
     if (start < chunk.length) fragments.push(chunk.subarray(start));
+  }
+}
+
+async function* rows(file) {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  for await (const line of completeLines(createReadStream(file))) {
+    const text = decoder.decode(line);
+    if (text) yield JSON.parse(text);
   }
 }
 
@@ -381,21 +388,22 @@ async function incremental(file, previous = {}) {
       || (stat.size === cursor.size && stat.mtimeMs !== cursor.mtime)
       || (offset && await sample(Math.max(0, offset - 128), Math.min(128, offset)) !== cursor.anchor);
     if (reset) { cursor = {}; offset = 0; }
-    const chunks = [], buffer = Buffer.alloc(256 * 1024);
-    let position = offset;
-    while (position < stat.size) {
-      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, stat.size - position), position);
-      if (!bytesRead) break;
-      chunks.push(Buffer.from(buffer.subarray(0, bytesRead))); position += bytesRead;
+    const records = [], marks = new Set();
+    let bytesRead = 0;
+    if (offset < stat.size) {
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+      const stream = handle.createReadStream({ start: offset, end: stat.size - 1, autoClose: false });
+      for await (const line of completeLines(stream)) {
+        const text = decoder.decode(line);
+        if (text) records.push(JSON.parse(text));
+        for (const [, key] of text.matchAll(/\[session-sync:v2:([a-f0-9]{64}|seed)\]/g)) marks.add(key);
+        offset += line.length + 1;
+      }
+      bytesRead = stream.bytesRead;
     }
-    const bytes = Buffer.concat(chunks), end = bytes.lastIndexOf(10) + 1;
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, end));
-    const records = text.split('\n').filter(Boolean).map(JSON.parse);
-    const marks = new Set([...text.matchAll(/\[session-sync:v2:([a-f0-9]{64}|seed)\]/g)].map(m => m[1]));
-    offset += end;
     cursor = { ...cursor, offset, identity, size: stat.size, mtime: stat.mtimeMs,
       anchor: await sample(Math.max(0, offset - 128), Math.min(128, offset)) };
-    return { records, marks, cursor, reset, bytesRead: bytes.length };
+    return { records, marks, cursor, reset, bytesRead };
   } finally { await handle.close(); }
 }
 

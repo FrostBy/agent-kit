@@ -194,6 +194,28 @@ test('incremental byte reader: partial UTF-8, truncation, replacement and same-s
   await fs.writeFile(file, Buffer.from([0xff, 10])); await assert.rejects(incremental(file), /encoded data/);
 });
 
+test('incremental reader decodes each record separately when the transcript exceeds the string limit', async t => {
+  const { file } = await fixture(t);
+  const marker = 'a'.repeat(64);
+  const records = Array.from({ length: 4 }, (_, i) => ({ id: i, text: 'я'.repeat(18000) + `[session-sync:v2:${marker}]` }));
+  const text = jsonl(records);
+  await fs.writeFile(file, text + '{"incomplete":');
+  const decode = TextDecoder.prototype.decode;
+  t.mock.method(TextDecoder.prototype, 'decode', function (buffer, options) {
+    assert(buffer.byteLength < 65536, 'decode must receive one record at a time');
+    return decode.call(this, buffer, options);
+  });
+
+  const read = await incremental(file);
+  assert.deepEqual(read.records, records);
+  assert.deepEqual([...read.marks], [marker]);
+  assert.equal(read.cursor.offset, Buffer.byteLength(text));
+  assert.equal(read.bytesRead, Buffer.byteLength(text + '{"incomplete":'));
+  const retry = await incremental(file, read.cursor);
+  assert.equal(retry.records.length, 0);
+  assert.equal(retry.cursor.offset, read.cursor.offset);
+});
+
 test('journal reader streams complete records across UTF-8 boundaries and rejects corrupt data', async t => {
   const { file } = await fixture(t);
   const first = { text: 'x'.repeat(65526) + '\u043f\u0440\u0438\u0432\u0435\u0442' }, second = { key: 'next' };
