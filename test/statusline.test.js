@@ -14,6 +14,16 @@ const today = require('../src/sources/today');
 const { renderSubagents } = require('../src/subagent');
 const { deepMerge } = require('../src/util');
 
+test('git worker supervisor stops a blocked scan and allows a completed scan', async () => {
+  const { superviseGit } = require('../src/cache');
+  const completed = await superviseGit(['-e', 'process.exit(0)'], 5000);
+  const started = Date.now();
+  const blocked = await superviseGit(['-e', 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)'], 500);
+  assert.equal(completed, false);
+  assert.equal(blocked, true);
+  assert.ok(Date.now() - started < 5000);
+});
+
 const NOW = Date.UTC(2026, 9, 22, 12, 0, 0);
 const plain = (over = {}) => deepMerge(config.DEFAULTS, { color: false, links: false, ...over });
 

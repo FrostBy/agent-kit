@@ -130,6 +130,12 @@ A Claude session started in an umbrella directory keeps the same mirror when mov
 
 Internals, limits, state layout and manual checks: [docs/sync.md](docs/sync.md).
 
+### Claude Code in WSL
+
+Claude can run in WSL while Codex, the sync engine and broker workers stay on Windows. With the same transcript directory and pair registry, `claude --resume` opens the same conversation after the move. The move requires no manual compact.
+
+The [WSL setup guide](docs/sync.md#wsl-and-existing-session-pairs) covers separate profiles, GoodAccess, broker notifications and a local `claude-start.cmd` launcher.
+
 ## Install
 
 Install it globally from GitHub, then point Claude Code at it:

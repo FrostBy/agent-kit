@@ -206,12 +206,20 @@ function ack(dir, id) {
 function formatEvent(event, dir) {
   const script = path.resolve(__dirname, '../../scripts/agents/broker.js').replace(/\\/g, '/');
   const stateDir = path.resolve(dir, path.dirname(event.file || '.'));
-  const target = `--name ${event.from} --state ${JSON.stringify(stateDir)}`;
+  const wsl = process.platform === 'win32' && process.env.AGENT_KIT_WSL_BROKER === '1';
+  const displayPath = file => wsl
+    ? file.replace(/\\/g, '/').replace(/^([a-z]):\//i, (_, drive) => `/mnt/${drive.toLowerCase()}/`) : file;
+  const target = `--name ${event.from} --state ${JSON.stringify(displayPath(stateDir))}`;
   let command;
   if (event.type === 'question') command = `answer ${target} --request ${event.requestId} --file ANSWERS.json (or --text for one question)`;
   else if (event.type === 'approval') command = `approve ${target} --request ${event.requestId} (or deny)`;
-  else command = `event consumed; full result: ${path.join(stateDir, event.from + '.out.md')}`;
-  return `[mesh] ${event.from} ${event.type}${event.requestId ? ` requestId=${event.requestId}` : ''}: ${event.summary}\n${command.startsWith('event ') ? '' : `node "${script}" `}${command}\neventId=${event.id}`;
+  else if (event.type === 'turn.completed' && Number.isInteger(event.payload?.turnNumber)) {
+    command = `event consumed; full result: ${displayPath(path.join(stateDir, event.from + '.history.md'))} (## Ход ${event.payload.turnNumber})`;
+  } else {
+    command = `event consumed; full result: ${displayPath(path.join(stateDir, event.from + '.out.md'))}`;
+  }
+  const prefix = command.startsWith('event ') ? '' : wsl ? 'agent-broker ' : `node "${script}" `;
+  return `[mesh] ${event.from} ${event.type}${event.requestId ? ` requestId=${event.requestId}` : ''}: ${event.summary}\n${prefix}${command}\neventId=${event.id}`;
 }
 function questionResult(params, payload) {
   const questions = params.questions || [];

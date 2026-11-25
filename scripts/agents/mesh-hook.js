@@ -10,26 +10,32 @@ const { nextEvent, formatEvent, hasLiveBroker, brokerStates, alive } = require('
 function scratchpad(input, tmp = os.tmpdir(), env = process.env) {
   if (input.agent_id) return null;
   if (!/^[\w-]+$/.test(input.session_id || '')) throw Error('Invalid hook session_id');
+  const uid = env.AGENT_KIT_CLAUDE_UID;
+  if (uid !== undefined && !/^\d+$/.test(uid)) throw Error('Invalid AGENT_KIT_CLAUDE_UID');
+  // In WSL the transcript can keep its Windows alias while the scratchpad follows the Linux launch directory.
+  const wslProjectDir = uid === undefined ? undefined : env.AGENT_KIT_CLAUDE_PROJECT_DIR;
+  if (wslProjectDir && !path.posix.isAbsolute(wslProjectDir)) throw Error('Invalid AGENT_KIT_CLAUDE_PROJECT_DIR');
   let project;
-  if (input.transcript_path) {
+  if (!wslProjectDir && input.transcript_path) {
     const paths = path.win32.isAbsolute(input.transcript_path) ? path.win32 : path.posix;
     const parent = paths.dirname(input.transcript_path);
     if (paths.basename(paths.dirname(parent)) === 'projects' && paths.basename(input.transcript_path) === `${input.session_id}.jsonl`) project = paths.basename(parent);
   }
   if (!project) {
-    if (typeof input.cwd !== 'string' || !input.cwd || !(path.isAbsolute(input.cwd) || path.win32.isAbsolute(input.cwd))) throw Error('Hook needs cwd or a session transcript path');
-    project = slug(input.cwd);
+    const projectDir = wslProjectDir || input.cwd;
+    if (typeof projectDir !== 'string' || !projectDir || !(path.isAbsolute(projectDir) || path.win32.isAbsolute(projectDir))) throw Error('Hook needs cwd or a session transcript path');
+    project = slug(projectDir);
     if (project.length > 200) {
       let hash = 0;
-      for (let i = 0; i < input.cwd.length; i++) hash = ((hash << 5) - hash + input.cwd.charCodeAt(i)) | 0;
+      for (let i = 0; i < projectDir.length; i++) hash = ((hash << 5) - hash + projectDir.charCodeAt(i)) | 0;
       project = `${project.slice(0, 200)}-${Math.abs(hash).toString(36)}`;
     }
   }
   if (!/^[\w-]+$/.test(project)) throw Error('Invalid Claude project slug');
   const hashed = createHash('sha256').update(project.toLowerCase()).digest('hex').slice(0, 16);
   const desktop = ['claude-desktop', 'claude-desktop-3p', 'local-agent'].includes(env.CLAUDE_CODE_ENTRYPOINT);
-  const short = env.CLAUDE_CODE_HOST_SHORT_TEMP_DIRS === undefined ? !desktop : /^(1|true)$/i.test(String(env.CLAUDE_CODE_HOST_SHORT_TEMP_DIRS));
-  const root = path.join(env.CLAUDE_CODE_TMPDIR || tmp, 'claude');
+  const short = env.CLAUDE_CODE_HOST_SHORT_TEMP_DIRS === undefined ? !desktop && !wslProjectDir : /^(1|true)$/i.test(String(env.CLAUDE_CODE_HOST_SHORT_TEMP_DIRS));
+  const root = path.join(env.CLAUDE_CODE_TMPDIR || tmp, uid === undefined ? 'claude' : `claude-${uid}`);
   const dirs = (short ? [hashed, project] : [project, hashed]).map(name => path.join(root, name, input.session_id, 'scratchpad'));
   // Older CLI versions and desktop hosts still use the readable project directory.
   return dirs.find(dir => fs.existsSync(dir)) || dirs[0];

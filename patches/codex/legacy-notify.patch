@@ -1,0 +1,127 @@
+diff --git a/codex-rs/hooks/src/legacy_notify.rs b/codex-rs/hooks/src/legacy_notify.rs
+--- a/codex-rs/hooks/src/legacy_notify.rs
++++ b/codex-rs/hooks/src/legacy_notify.rs
+@@ -41,6 +41,54 @@
+     }
+ }
+ 
++#[cfg(any(windows, test))]
++fn windows_arg_bound(arg: &str) -> usize {
++    // Reserve quoting, the argument separator, and worst-case escaping.
++    arg.encode_utf16().count() + arg.bytes().filter(|&byte| matches!(byte, b'\\' | b'"')).count() + 3
++}
++
++#[cfg(any(windows, test))]
++fn notification_preview(text: &str, limit: usize) -> String {
++    match text.char_indices().nth(limit) {
++        Some((end, _)) => format!("{}\u{2026}", &text[..end]),
++        None => text.to_owned(),
++    }
++}
++
++#[cfg(any(windows, test))]
++fn windows_notify_json(
++    payload: &HookPayload,
++    argv: &[String],
++) -> Result<Option<String>, serde_json::Error> {
++    // Leave headroom below the CreateProcessW limit, including the executable path.
++    let available = 30_000usize.saturating_sub(argv.iter().map(|arg| windows_arg_bound(arg)).sum());
++    let full = legacy_notify_json(payload)?;
++    if windows_arg_bound(&full) <= available {
++        return Ok(Some(full));
++    }
++
++    let mut preview = payload.clone();
++    let HookEvent::AfterAgent { event } = &mut preview.hook_event;
++    let input = event.input_messages.pop();
++    let answer = event.last_assistant_message.take();
++    for limit in [8_192, 2_048, 512, 128, 0] {
++        let HookEvent::AfterAgent { event } = &mut preview.hook_event;
++        event.input_messages = input
++            .as_deref()
++            .map(|text| notification_preview(text, limit))
++            .into_iter()
++            .collect();
++        event.last_assistant_message = answer
++            .as_deref()
++            .map(|text| notification_preview(text, limit));
++        let json = legacy_notify_json(&preview)?;
++        if windows_arg_bound(&json) <= available {
++            return Ok(Some(json));
++        }
++    }
++    Ok(None)
++}
++
+ // TODO: Remove this hook and its environment plumbing when legacy `notify` support is removed.
+ pub(crate) fn notify_hook(argv: Vec<String>, environment: Arc<Vec<(OsString, OsString)>>) -> Hook {
+     let argv = Arc::new(argv);
+@@ -54,7 +102,19 @@
+                     Some(command) => command,
+                     None => return HookResult::Success,
+                 };
+-                if let Ok(notify_payload) = legacy_notify_json(payload) {
++                #[cfg(windows)]
++                let notify_payload = match windows_notify_json(payload, &argv) {
++                    Ok(Some(json)) => Some(json),
++                    Ok(None) => {
++                        return HookResult::FailedContinue(anyhow::anyhow!(
++                            "legacy notify command and metadata exceed the Windows argument budget"
++                        ).into());
++                    }
++                    Err(_) => None,
++                };
++                #[cfg(not(windows))]
++                let notify_payload = legacy_notify_json(payload).ok();
++                if let Some(notify_payload) = notify_payload {
+                     command.arg(notify_payload);
+                 }
+ 
+@@ -116,6 +176,47 @@
+         let serialized = serde_json::to_string(&notification)?;
+         let actual: Value = serde_json::from_str(&serialized)?;
+         assert_eq!(actual, expected_notification_json());
++        Ok(())
++    }
++
++    #[test]
++    fn windows_notify_keeps_short_payloads_and_bounds_escaped_previews() -> Result<()> {
++        let mut payload = HookPayload {
++            session_id: ThreadId::new(),
++            cwd: test_path_buf("/Users/example/project").abs(),
++            client: Some("codex-tui".to_string()),
++            triggered_at: chrono::Utc::now(),
++            hook_event: HookEvent::AfterAgent {
++                event: HookEventAfterAgent {
++                    thread_id: ThreadId::new(),
++                    turn_id: "12345".to_string(),
++                    input_messages: vec!["Short input".to_string()],
++                    last_assistant_message: Some("Short answer".to_string()),
++                },
++            },
++        };
++        let argv = vec!["C:\\Program Files\\Example\\notify.exe".to_string()];
++        let short = legacy_notify_json(&payload)?;
++        assert_eq!(windows_notify_json(&payload, &argv)?, Some(short.clone()));
++
++        let HookEvent::AfterAgent { event } = &mut payload.hook_event;
++        let text = format!("\u{411}\u{414} \u{1f600} {}", "\"\\\n\u{0001}".repeat(8_000));
++        event.input_messages = vec!["Earlier input".repeat(4_000), text.clone()];
++        event.last_assistant_message = Some(text);
++        let bounded = windows_notify_json(&payload, &argv)?.expect("notification fits");
++        assert!(windows_arg_bound(&bounded) + windows_arg_bound(&argv[0]) <= 30_000);
++        let actual: Value = serde_json::from_str(&bounded)?;
++        let short: Value = serde_json::from_str(&short)?;
++        for key in ["type", "thread-id", "turn-id", "cwd", "client"] {
++            assert_eq!(actual[key], short[key]);
++        }
++        assert_eq!(actual["input-messages"].as_array().expect("inputs").len(), 1);
++        for value in [&actual["input-messages"][0], &actual["last-assistant-message"]] {
++            let text = value.as_str().expect("preview");
++            assert!(text.starts_with("\u{411}\u{414} \u{1f600}"));
++            assert!(text.ends_with('\u{2026}'));
++        }
++        assert!(windows_notify_json(&payload, &["a".repeat(30_000)])?.is_none());
+         Ok(())
+     }
+ 

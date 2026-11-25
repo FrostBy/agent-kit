@@ -32,23 +32,34 @@ function tomlBlock(text, block) {
   return block ? text + (text && !text.endsWith('\n') ? '\n' : '') + block : text;
 }
 
-function configure({ env = process.env, remove = false, log = console.log } = {}) {
+function configure({ env = process.env, remove = false, wsl = false, log = console.log } = {}) {
+  if (wsl && process.platform !== 'win32') throw Error('Install the WSL hook from Windows');
   const config = configuration(process.cwd(), env);
   const resolve = file => { try { return fs.realpathSync(file); } catch (e) { if (e.code !== 'ENOENT') throw e; return file; } };
   const settingsFile = resolve(path.join(config.claudeHome, 'settings.json')), tomlFile = resolve(path.join(config.codexHome, 'config.toml'));
   const script = path.resolve(__dirname, '../../scripts/agents/sync.js');
-  const generated = hookConfigs(script);
+  const defaults = hookConfigs(script);
+  const withWsl = process.platform === 'win32' ? hookConfigs(script, { wsl: true }) : defaults;
   const read = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
   const beforeSettings = read(settingsFile), beforeToml = read(tomlFile);
   const settings = JSON.parse(beforeSettings || '{}');
   if (!settings || typeof settings !== 'object' || Array.isArray(settings) || (settings.hooks && (typeof settings.hooks !== 'object' || Array.isArray(settings.hooks)))) throw Error('Invalid Claude settings/hooks');
-  const commands = new Set(Object.values(generated.claude.hooks).map(groups => groups[0].hooks[0].command));
+  const command = config => config.claude.hooks.SessionStart[0].hooks[0].command;
+  const wslCommand = withWsl === defaults ? null : command(withWsl);
+  const commands = new Set([command(defaults), command(withWsl)]);
   // Match only our command; unrelated hooks and edits made after installation survive removal.
   for (const [event, groups] of Object.entries(settings.hooks || {})) {
     if (!Array.isArray(groups) || groups.some(g => !g || !Array.isArray(g.hooks))) throw Error('Invalid Claude hook group');
-    settings.hooks[event] = groups.map(group => ({ ...group, hooks: group.hooks.filter(h => !commands.has(h.command)) })).filter(group => group.hooks.length);
+    settings.hooks[event] = groups.map(group => ({
+      ...group,
+      hooks: group.hooks.filter(h => {
+        if (wslCommand && h.command === wslCommand) wsl = true;
+        return !commands.has(h.command);
+      }),
+    })).filter(group => group.hooks.length);
     if (!settings.hooks[event].length) delete settings.hooks[event];
   }
+  const generated = wsl ? withWsl : defaults;
   if (!remove) {
     settings.hooks ||= {};
     for (const [event, entries] of Object.entries(generated.claude.hooks)) (settings.hooks[event] ||= []).push(...entries);

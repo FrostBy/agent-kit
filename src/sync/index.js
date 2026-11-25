@@ -19,6 +19,7 @@ const { acquire } = require('./lease');
 const processCache = require('./process-cache');
 const { version } = require('./versions');
 const { createCodexMirror } = require('./codex-mirror');
+const { plain } = require('../agents/codex-path');
 const MARK = '[session-sync:v2:';
 const ELIGIBILITY_VERSION = 2;
 const digest = x => createHash('sha256').update(x).digest('hex');
@@ -365,7 +366,7 @@ function configuration(cwd, env = process.env) {
   const home = env.HOME || env.USERPROFILE || os.homedir();
   const claudeHome = path.resolve(env.CLAUDE_CONFIG_DIR || path.join(home, '.claude'));
   const codexHome = path.resolve(env.CODEX_HOME || path.join(home, '.codex'));
-  cwd = path.resolve(cwd);
+  cwd = path.resolve(process.platform === 'win32' ? plain(cwd) : cwd);
   const identity = process.platform === 'win32' ? cwd.toLowerCase() : cwd;
   const contextTokens = Number(env.SESSION_SYNC_CONTEXT_TOKENS || 50000);
   return { cwd, claudeHome, codexHome, contextTokens, claudeProjectsDir: path.join(claudeHome, 'projects'),
@@ -459,6 +460,14 @@ async function hook(kind, input, config, options = {}) {
   if (env.SESSION_SYNC_EXCLUDE || env.SESSION_SYNC_BROKER || input.agent_id || input.isSidechain || input.is_sidechain) return null;
   if (!config) {
     config = configuration(input.cwd, env);
+    if (kind === 'codex' && !env.CLAUDE_CONFIG_DIR) {
+      const profiles = await readJson(path.join(config.codexHome, 'agent-kit', 'sync-profiles.json'), {});
+      const profile = Object.entries(profiles).find(([project]) => same(plain(project), config.cwd))?.[1];
+      if (profile !== undefined) {
+        if (typeof profile !== 'string' || !path.isAbsolute(profile)) throw Error('Sync profile must be an absolute Claude config directory');
+        config = configuration(config.cwd, { ...env, CLAUDE_CONFIG_DIR: profile });
+      }
+    }
     if (kind === 'claude') {
       const project = await claudeProject(input, config);
       if (!same(project, config.cwd)) config = configuration(project, env);
@@ -514,8 +523,12 @@ async function hook(kind, input, config, options = {}) {
         endpoint.meta = meta ? (client === 'claude' ? { sessionId: meta.sessionId, cwd: meta.cwd, version: meta.version }
           : { id: meta.id, cwd: meta.cwd, source: meta.source, thread_source: meta.thread_source, originator: meta.originator, cli_version: meta.cli_version, parent_thread_id: meta.parent_thread_id, session_sync: meta.session_sync }) : (read.reset ? null : endpoint.meta);
         if (endpoint.meta && (endpoint.meta.id ?? endpoint.meta.sessionId) !== endpoint.id) throw Error('Transcript/session ID mismatch');
-        if (endpoint.meta?.cwd && !await samePath(endpoint.meta.cwd, config.cwd)
-          && !(client === 'claude' && within(config.cwd, endpoint.meta.cwd))) throw Error('Transcript cwd mismatch');
+        const recordedCwd = endpoint.meta?.cwd;
+        // WSL Claude appends its own paths even when the hook and the existing pair are on Windows.
+        const transcriptCwd = client === 'claude' && process.platform === 'win32'
+          ? recordedCwd?.replace(/^\/mnt\/([a-z])(?:\/|$)/i, '$1:/') : recordedCwd;
+        if (transcriptCwd && !await samePath(transcriptCwd, config.cwd)
+          && !(client === 'claude' && within(config.cwd, transcriptCwd))) throw Error('Transcript cwd mismatch');
         return read;
       }
       const decisions = await processCache.decisions(config.stateDir);
@@ -649,10 +662,17 @@ async function hook(kind, input, config, options = {}) {
   });
 }
 
-function hookConfigs(script) {
+function hookConfigs(script, { wsl = false } = {}) {
   const events = ['SessionStart', 'UserPromptSubmit', 'Stop'];
   const command = kind => `node "${script.replaceAll('\\', '/')}" hook ${kind}`;
-  const hooks = Object.fromEntries(events.map(event => [event, [{ hooks: [{ type: 'command', command: command('claude'), timeout: 30 }] }]]));
+  const quote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+  const adapter = quote(path.join(path.dirname(script), 'sync-wsl.py'));
+  const node = quote(process.execPath);
+  const claude = wsl ? {
+    shell: 'bash',
+    command: `if [ "$(uname -s)" = Linux ]; then exec python3 "$(wslpath -u ${adapter})" "$(wslpath -u ${node})"; else ${command('claude')}; fi`,
+  } : { command: command('claude') };
+  const hooks = Object.fromEntries(events.map(event => [event, [{ hooks: [{ type: 'command', ...claude, timeout: 30 }] }]]));
   const codex = events.map(event => `[[hooks.${event}]]\n[[hooks.${event}.hooks]]\ntype = "command"\ncommand = ${JSON.stringify(command('codex'))}\ntimeout = 30\n${event !== 'Stop' ? 'additionalContextLimit = 16000\n' : ''}`).join('\n');
   return { claude: { hooks }, codex };
 }

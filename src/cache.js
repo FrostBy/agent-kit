@@ -14,9 +14,32 @@ const writeRaw = (name, obj) => { try { writeJson(file(name), obj); } catch { /*
 
 function spawnWorker(worker, args = []) {
   try {
-    spawn(process.execPath, [path.join(__dirname, '..', 'statusline.js'), `--refresh=${worker}`, ...args],
+    const mode = worker === 'git' ? 'git-supervisor' : worker;
+    spawn(process.execPath, [path.join(__dirname, '..', 'statusline.js'), `--refresh=${mode}`, ...args],
       { detached: true, stdio: 'ignore', windowsHide: true }).unref();
   } catch { /* a failed refresh must not break the render */ }
+}
+
+function superviseGit(args, timeout = 60_000) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, args, {
+      detached: process.platform !== 'win32', stdio: 'ignore', windowsHide: true,
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (process.platform === 'win32') {
+        const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true });
+        killer.on('error', () => child.kill());
+        killer.on('close', (code) => { if (code !== 0) child.kill(); });
+      } else {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+      }
+    }, timeout);
+    const finish = () => { clearTimeout(timer); resolve(timedOut); };
+    child.once('error', finish);
+    child.once('close', finish);
+  });
 }
 
 // Stale-while-revalidate: render returns cached data immediately and refreshes in a detached process,
@@ -70,4 +93,4 @@ function incremental(filename, initial, reduce, version) {
   return c.data;
 }
 
-module.exports = { read, write, writeRaw, getStale, spawnWorker, file, parsedFile, incremental };
+module.exports = { read, write, writeRaw, getStale, spawnWorker, superviseGit, file, parsedFile, incremental };

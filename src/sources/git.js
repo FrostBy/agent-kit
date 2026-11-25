@@ -1,13 +1,30 @@
 'use strict';
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const cache = require('../cache');
 
+// The render exits mid-scan by design; an orphaned `git status` would keep running and pile up with the next ones.
+const running = new Set();
+process.on('exit', () => { for (const child of running) { try { child.kill(); } catch { /* already gone */ } } });
+
+// Under WSL a repo on a Windows drive goes to Windows git: Linux git reads it through 9p and can take minutes.
+const WINDOWS_GIT = '/mnt/c/Program Files/Git/cmd/git.exe';
+const IS_WSL = process.platform === 'linux' && /microsoft/i.test(os.release());
+function gitFor(dir) {
+  const m = IS_WSL && /^\/mnt\/([a-z])(\/.*)?$/.exec(path.resolve(dir));
+  if (m && fs.existsSync(WINDOWS_GIT)) return [WINDOWS_GIT, `${m[1].toUpperCase()}:${(m[2] || '/').replaceAll('/', '\\')}`];
+  return ['git', dir];
+}
+
 // --no-optional-locks: our background `git status` must not grab index.lock while the user commits.
-const git = (dir, args, timeout = 3000) => new Promise((res) =>
-  execFile('git', ['--no-optional-locks', '-C', dir, ...args], { timeout, windowsHide: true, maxBuffer: 16 << 20 },
-    (err, out) => res(err ? null : out)));
+const git = (dir, args, timeout = 3000) => new Promise((res) => {
+  const [bin, at] = gitFor(dir);
+  const child = execFile(bin, ['--no-optional-locks', '-C', at, ...args], { timeout, windowsHide: true, maxBuffer: 16 << 20 },
+    (err, out) => { running.delete(child); res(err ? null : out); });
+  running.add(child);
+});
 
 function parseStatus(text) {
   const r = { branch: '?', ahead: 0, behind: 0, changed: 0, deleted: 0, staged: 0, untracked: 0, conflicts: 0 };
@@ -81,6 +98,9 @@ async function collect(cwd, opts) {
   return { mode: 'umbrella', root: cwd, repos };
 }
 
+// The detached worker's own budget (statusline.js --refresh=git); a lock older than this belongs to a dead worker.
+const WORKER_BUDGET_MS = 60_000;
+
 const cacheKey = (cwd) => `git-${require('crypto').createHash('sha1').update(path.resolve(cwd)).digest('hex').slice(0, 16)}`;
 
 async function refresh(cwd, opts) {
@@ -92,6 +112,9 @@ async function refresh(cwd, opts) {
 // A slow repo (or twelve of them) must not stall the render: past the budget we show the last known state
 // and finish the scan in a detached process — an in-process promise would keep Node (and Claude Code) waiting.
 async function load(cwd, opts = {}) {
+  const cached = cache.read(cacheKey(cwd));
+  // A background scan is still running: show the last state instead of starting a second scan beside it.
+  if (cached?.attemptAt && Date.now() - cached.attemptAt < WORKER_BUDGET_MS) return cached.data ?? null;
   let timer;
   const timeout = new Promise((res) => { timer = setTimeout(() => res(undefined), opts.budgetMs ?? 400); });
   const g = await Promise.race([refresh(cwd, opts), timeout]);

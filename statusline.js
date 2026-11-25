@@ -37,7 +37,10 @@ const readStdin = () => { try { const raw = fs.readFileSync(0, 'utf8'); return r
 const done = (text, code = 0) => { process.stdout.write(text); process.exit(code); };
 
 async function refreshWorker(kind) {
-  if (kind === 'usage') await require('./src/sources/usage').refresh();
+  if (kind === 'git-supervisor') {
+    await require('./src/cache').superviseGit([__filename, '--refresh=git', args[args.indexOf('--refresh=git-supervisor') + 1]]);
+  }
+  else if (kind === 'usage') await require('./src/sources/usage').refresh();
   else if (kind === 'today') {
     const { PRICES } = require('./src/pricing');
     await require('./src/sources/today').refresh(Date.now(), { ...PRICES, ...config.load().pricing });

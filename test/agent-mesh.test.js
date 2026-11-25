@@ -112,20 +112,45 @@ test('hook derives session scratchpad from transcript or cwd, skips subagents, a
 });
 
 test('hook finds current hashed, legacy and custom Claude scratchpad roots', t => {
-  const tmp = fixture(t), input = { session_id: 'owner', cwd: 'Z:\\weknowgaming' };
-  assert.equal(scratchpad(input, tmp, {}), path.join(tmp, 'claude', 'd87291c2f693a0c9', 'owner', 'scratchpad'));
+  const tmp = fixture(t), input = { session_id: 'owner', cwd: 'Z:\\example' };
+  assert.equal(scratchpad(input, tmp, {}), path.join(tmp, 'claude', '2f3883320d1b0a82', 'owner', 'scratchpad'));
   const desktop = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' };
-  const legacy = path.join(tmp, 'claude', 'z--weknowgaming', 'owner', 'scratchpad');
+  const legacy = path.join(tmp, 'claude', 'z--example', 'owner', 'scratchpad');
   assert.equal(scratchpad(input, tmp, desktop), legacy);
   assert.equal(scratchpad(input, tmp, { CLAUDE_CODE_HOST_SHORT_TEMP_DIRS: 'false' }), legacy);
   fs.mkdirSync(legacy, { recursive: true });
   assert.equal(scratchpad(input, tmp, {}), legacy);
   const custom = path.join(tmp, 'custom');
-  assert.equal(scratchpad(input, tmp, { CLAUDE_CODE_TMPDIR: custom }), path.join(custom, 'claude', 'd87291c2f693a0c9', 'owner', 'scratchpad'));
+  assert.equal(scratchpad(input, tmp, { CLAUDE_CODE_TMPDIR: custom }), path.join(custom, 'claude', '2f3883320d1b0a82', 'owner', 'scratchpad'));
+  const linux = { session_id: 'owner', transcript_path: '/home/u/.claude/projects/-mnt-z-example/owner.jsonl' };
+  assert.equal(scratchpad(linux, tmp, { CLAUDE_CODE_TMPDIR: custom, AGENT_KIT_CLAUDE_UID: '1000', CLAUDE_CODE_HOST_SHORT_TEMP_DIRS: 'false' }), path.join(custom, 'claude-1000', '-mnt-z-example', 'owner', 'scratchpad'));
+  assert.throws(() => scratchpad(input, tmp, { AGENT_KIT_CLAUDE_UID: '1000;x' }), /AGENT_KIT_CLAUDE_UID/);
+});
+
+test('WSL hook delivers events from the launch project and names the completed report section', async t => {
+  const tmp = fixture(t);
+  const input = { session_id: 'owner', cwd: '/mnt/z/example/repo',
+    transcript_path: '/home/u/.claude/projects/z--example/owner.jsonl', hook_event_name: 'Stop' };
+  const env = { AGENT_KIT_CLAUDE_UID: '1000', AGENT_KIT_CLAUDE_PROJECT_DIR: '/mnt/z/example' };
+  const dir = path.join(tmp, 'claude-1000', '-mnt-z-example', 'owner', 'scratchpad');
+  fs.mkdirSync(scratchpad(input, tmp, { AGENT_KIT_CLAUDE_UID: '1000' }), { recursive: true });
+  assert.equal(scratchpad(input, tmp, env), dir);
+  const messages = [], options = { env, tmp, ...short, write: text => messages.push(text) };
+  const waiting = hook(input, options);
+  const base = path.join(dir, 'worker');
+  const emit = eventWriter(base, 'worker');
+  fs.writeFileSync(`${base}.history.md`, '## Ход 1\nOriginal report\n## Ход 2\nFollow-up');
+  fs.writeFileSync(`${base}.out.md`, 'Follow-up');
+  emit('turn.completed', { status: 'completed', turnNumber: 1 }, { summary: 'Original report' });
+  emit('turn.completed', { status: 'completed', turnNumber: 2 }, { summary: 'Follow-up' });
+  assert.equal(await waiting, 2);
+  assert.match(messages[0], /worker\.history\.md \(## Ход 1\)/);
+  assert.equal(await hook(input, options), 2);
+  assert.match(messages[1], /worker\.history\.md \(## Ход 2\)/);
 });
 
 test('Claude hook delivers turn completion while the persistent broker is still alive', async t => {
-  const tmp = fixture(t), input = { session_id: 'live-owner', cwd: 'Z:\\weknowgaming', hook_event_name: 'PostToolUse' };
+  const tmp = fixture(t), input = { session_id: 'live-owner', cwd: 'Z:\\example', hook_event_name: 'PostToolUse' };
   const dir = scratchpad(input, tmp, {}), writes = [];
   const broker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
   t.after(() => broker.kill());

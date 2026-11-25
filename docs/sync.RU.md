@@ -73,3 +73,97 @@ Claude получает экспорт одним ответом хука и с�
 - `node scripts/agents/audit-mirror.js --claude "<transcript.jsonl>" [--codex-home DIR] [--count 3] [--json]`: только чтение; прогоняет извлечение и рендер на интерактивных неброкерских rollout проекта и печатает категории, счётчики и примеры без содержимого переписки и аргументов инструментов. RAW, служебный текст как сообщение пользователя или нехватка примеров Codex дают exit 1.
 - `node scripts/agents/measure-sync.js /path/to/session-sync-state/pairs.json`: офлайн-замер на **копиях** пары старого формата во временных изолированных homes; печатает время первого разбора и повторных хуков, затем удаляет временное дерево.
 - `node scripts/agents/smoke-live.js --live`: smoke с реальным демоном и моделью; запрашивает ровно `pong`, отправляет `/exit`, проверяет `state.archived=true` и SQLite `archived=1` в режиме чтения; артефакты сохраняются. Без `--live` ничего не делает. Для SQLite-проверки нужен Node 22.13+; сам брокер поддерживает Node 20.
+
+## WSL и существующие пары
+
+Claude Code работает нативно в WSL. Codex, синк и исполнители брокера работают на Windows. В примере `Z:\example` и `/mnt/z/example` указывают на один проект, а `Z:\agent-kit` содержит репозиторий agent-kit. Подставьте свои пути.
+
+### Проверьте пути и interop
+
+Выполните из той оболочки, из которой будет запускаться Claude.
+
+```bash
+cd /mnt/z/example
+python3 --version
+wslpath -w "$PWD"
+export AGENT_KIT_WINDOWS_NODE="$(wslpath -u 'C:\Program Files\nodejs\node.exe')"
+"$AGENT_KIT_WINDOWS_NODE" --version
+```
+
+Путь проекта должен преобразоваться в `Z:\example`. Если Windows Node установлен в другом месте, узнайте путь в PowerShell командой `(Get-Command node.exe).Source`. Если `node.exe` падает с `Exec format error`, проверьте WSL interop до отладки синка. Для GoodAccess выполните те же проверки внутри `ganet-enter`.
+
+### Сохраните историю и подключите хуки
+
+1. Сохраните Windows-профиль Claude, в котором лежит реестр пары. В его `agent-kit/sync` хранятся ID пар и позиции чтения.
+2. Направьте Linux-профиль в существующий каталог транскриптов проекта. Claude выбирает этот каталог по пути запуска, поэтому имена на Linux и Windows могут различаться. Для отдельного WSL-профиля ссылка может выглядеть так:
+
+   ```bash
+   export CLAUDE_CONFIG_DIR="$HOME/.claude-work"
+   export SESSION_SYNC_WINDOWS_CLAUDE_DIR=/mnt/z/example/.claude-work
+   export CLAUDE_CODE_TMPDIR="$SESSION_SYNC_WINDOWS_CLAUDE_DIR/wsl-tmp"
+
+   mkdir -p "$CLAUDE_CONFIG_DIR/projects" "$CLAUDE_CODE_TMPDIR"
+   ln -sT "$SESSION_SYNC_WINDOWS_CLAUDE_DIR/projects/z--example" \
+     "$CLAUDE_CONFIG_DIR/projects/-mnt-z-example"
+   ```
+
+   Используйте имя каталога Windows-истории и имя, которое выбирает Claude при Linux-запуске. Если в каталоге Linux уже есть свои сессии, проверьте его перед созданием ссылки. Linux-команды MCP и авторизацию храните в Linux-профиле. Если профиль целиком общий, укажите `SESSION_SYNC_WINDOWS_CLAUDE_DIR` как значение `CLAUDE_CONFIG_DIR` в WSL. При необходимости создайте ссылку на проект в общем `projects`.
+3. Оставьте установленные хуки Codex на Windows. Для общего `settings.json` выполните `node scripts/agents/sync.js install --wsl` из Windows-копии репозитория с нужным Windows `CLAUDE_CONFIG_DIR`. Для отдельного Linux-профиля сгенерируйте хуки из Windows и объедините полученный объект `hooks` с `settings.json` Linux-профиля:
+
+   ```powershell
+   node -e "const p=require('node:path'); const s=require('./src/sync'); console.log(JSON.stringify(s.hookConfigs(p.resolve('scripts/agents/sync.js'), {wsl:true}).claude, null, 2))"
+   ```
+
+   Хуки синка срабатывают на SessionStart, UserPromptSubmit и Stop. Они переводят пути WSL перед вызовом существующего синка на Windows. Если хук не может подключиться к локальному серверу Codex, выполните `codex app-server daemon start` в Windows.
+4. Если Windows Codex должен использовать отдельный профиль Claude, добавьте запись проекта в `CODEX_HOME/agent-kit/sync-profiles.json`. По умолчанию `CODEX_HOME` находится в `%USERPROFILE%\.codex`. Явно заданный Windows `CLAUDE_CONFIG_DIR` имеет приоритет.
+
+   ```json
+   {
+     "Z:\\example": "Z:\\example\\.claude-work"
+   }
+   ```
+
+### Продолжите ту же сессию
+
+Закройте Windows Claude с нужной перепиской. Из исходной папки проекта в WSL выполните `claude --resume` и выберите ту же сессию. Linux Claude откроет существующий транскрипт, а синк продолжит ту же пару. Обычные лимиты контекста Claude сохраняются.
+
+Для GoodAccess запускайте Linux CLI внутри `ganet-enter`. Перед запуском экспортируйте пути к профилям и Windows Node, как в предыдущих шагах.
+
+```bash
+sudo -n --preserve-env=WSL_INTEROP /usr/local/sbin/ganet-enter \
+  /usr/bin/env TZ=Europe/Warsaw PATH="$PATH" \
+  CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" \
+  SESSION_SYNC_WINDOWS_CLAUDE_DIR="$SESSION_SYNC_WINDOWS_CLAUDE_DIR" \
+  CLAUDE_CODE_TMPDIR="$CLAUDE_CODE_TMPDIR" \
+  AGENT_KIT_WINDOWS_NODE="$AGENT_KIT_WINDOWS_NODE" \
+  "$HOME/.local/bin/claude" --resume
+```
+
+Локальный Windows-лаунчер может выбирать WSL для рабочей папки и открывать список сессий. В проверенной установке `%USERPROFILE%\.claude\bin\claude-start.cmd` принимает папку проекта как аргумент. Это локальный файл.
+
+```powershell
+& "$env:USERPROFILE\.claude\bin\claude-start.cmd" 'Z:\example'
+```
+
+### Запускайте брокер из WSL
+
+Вызовите `bash /mnt/z/agent-kit/scripts/agents/broker-wsl.sh` со штатными аргументами брокера. Обёртка использует `AGENT_KIT_WINDOWS_NODE` и переводит пути, переданные в `--cwd`, `--state`, `--prompt` и другие файловые аргументы. В `--state` укажите scratchpad текущей сессии внутри общего `CLAUDE_CODE_TMPDIR`. Исполнители Windows используют сеть Windows.
+
+Для автоуведомлений используйте [штатные события mesh-хука](../scripts/agents/README.md#launch-resume-and-result-delivery) в Linux-профиле Claude. Для каждого mesh-хука задайте `shell` как `bash` и используйте этот фрагмент как `command`. Сохраните `asyncRewake` на SessionStart, PostToolUse и Stop, а SessionEnd оставьте синхронным.
+
+```bash
+export AGENT_KIT_WSL_BROKER=1
+export AGENT_KIT_CLAUDE_UID="$(id -u)"
+export AGENT_KIT_CLAUDE_PROJECT_DIR="$CLAUDE_PROJECT_DIR"
+export WSLENV="$WSLENV:CLAUDE_CODE_TMPDIR/pw:AGENT_KIT_WSL_BROKER/w:AGENT_KIT_CLAUDE_UID/w:AGENT_KIT_CLAUDE_PROJECT_DIR/w"
+exec "$AGENT_KIT_WINDOWS_NODE" \
+  "$(wslpath -w /mnt/z/agent-kit/scripts/agents/mesh-hook.js)"
+```
+
+Если автоуведомления ещё не подключены, используйте `events --next` через обёртку. Автохук и ручной ожидатель читают одну очередь, поэтому на сессию нужен один получатель событий.
+
+### Проверьте переход
+
+- Откройте старую пару и обменяйтесь сообщением в обе стороны. Убедитесь, что ID пары и транскрипт те же, а позиции чтения идут вперёд. Перейдите внутри сессии Claude в дочерний репозиторий и убедитесь, что она всё ещё использует исходную пару.
+- Если список сессий пуст, проверьте папку запуска и ссылку на каталог транскриптов. При `Orphan mirror` проверьте, какой профиль владеет парой и какой выбрал хук.
+- Проверьте доставку брокера на завершённой задаче. Claude должен получить уведомление и доступный из WSL путь к отчёту, пока исполнитель ещё работает. Подключения MCP в Linux-профиле проверьте через `claude mcp list`. Для работы уже подключённому MCP может отдельно понадобиться браузер или локальный сервис.

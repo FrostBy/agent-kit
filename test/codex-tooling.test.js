@@ -13,7 +13,7 @@ const common = require('../scripts/codex/common');
 test('manifest selection follows manifest order and includes dependencies', () => {
   assert.deepEqual(selectFeatures(manifest, 'interaction-modes,full-diff,full-diff').map(f => f.id), ['statusline', 'full-diff', 'interaction-modes']);
   assert.deepEqual(selectFeatures(manifest).map(f => f.id), [
-    'statusline', 'full-diff', 'exec-timing', 'capacity-retry', 'interaction-modes', 'restricted-subagents', 'dictation',
+    'statusline', 'full-diff', 'exec-timing', 'capacity-retry', 'interaction-modes', 'restricted-subagents', 'dictation', 'legacy-notify',
   ]);
   assert.deepEqual(selectFeatures(manifest, 'none'), []);
   assert.throws(() => selectFeatures(manifest, 'typo'), /Unknown feature/);

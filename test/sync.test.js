@@ -101,6 +101,43 @@ test('Claude launched in an umbrella keeps the same mirror when changing reposit
   assert.match(delivered.hookSpecificOutput.additionalContext, /Worked inside repo A[\s\S]*Worked inside repo B/);
 });
 
+test('a WSL project alias reuses the Windows pair and both transcript cursors', async t => {
+  const f = await fixture(t), { config, id } = f;
+  const file = path.join(config.claudeProjectsDir, slug(config.cwd), `${id}.jsonl`);
+  const repo = path.join(config.cwd, 'repo');
+  const alias = path.join(config.claudeProjectsDir, '-mnt-c-example');
+  const options = { ...opts, env: f.env, connectCodex: config.connectCodex, versions: config.versions };
+  await fs.mkdir(repo, { recursive: true });
+  await fs.symlink(path.dirname(file), alias, 'junction');
+  await fs.writeFile(file, jsonl([c(id, 'Windows original')]));
+  await hook('claude', f.input('claude', { id, file }), undefined, options);
+  await hook('codex', f.input('codex', (await f.pair()).codex), undefined, options);
+  const before = await f.pair(), previousJournal = await f.archive();
+
+  const aliasFile = path.join(alias, path.basename(file));
+  const transcriptCwd = process.platform === 'win32' ? `/mnt/${repo[0].toLowerCase()}${repo.slice(2).replaceAll('\\', '/')}` : repo;
+  await f.append(aliasFile, [c(id, 'WSL addition', { cwd: transcriptCwd })]);
+  await hook('claude', { ...f.input('claude', { id, file: aliasFile }, 'SessionStart'), cwd: repo }, undefined, options);
+  const midway = await f.pair();
+  assert.equal(midway.id, before.id);
+  assert.equal(midway.claude.cursor.identity, before.claude.cursor.identity);
+  assert.equal(midway.claude.cursor.offset, (await fs.stat(file)).size);
+  assert.deepEqual(midway.codex.cursor, before.codex.cursor);
+  assert.deepEqual((await f.archive()).slice(0, previousJournal.length), previousJournal);
+  assert.equal((await f.registry()).pairs.length, 1);
+  const routingDir = path.join(config.codexHome, 'agent-kit');
+  await fs.mkdir(routingDir);
+  await fs.writeFile(path.join(routingDir, 'sync-profiles.json'), JSON.stringify({ [config.cwd]: f.env.CLAUDE_CONFIG_DIR }));
+  const { CLAUDE_CONFIG_DIR, ...codexEnv } = f.env;
+  const delivery = await hook('codex', f.input('codex', midway.codex, 'SessionStart'), undefined, { ...options, env: codexEnv });
+  assert.match(delivery.hookSpecificOutput.additionalContext, /WSL addition/);
+
+  await f.append(midway.codex.file, [x('Windows Codex reply')]);
+  const result = await hook('claude', { ...f.input('claude', { id, file: aliasFile }, 'UserPromptSubmit'), cwd: repo }, undefined, options);
+  assert.match(result.hookSpecificOutput.additionalContext, /Windows Codex reply/);
+  await assert.rejects(fs.stat(configuration(repo, f.env).stateDir), { code: 'ENOENT' });
+});
+
 test('a Claude profile sharing projects resumes a verified mirror from the owning registry', async t => {
   const f = await fixture(t), { config } = f;
   const id = randomUUID(), file = path.join(config.codexSessionsDir, `${id}.jsonl`);
@@ -330,6 +367,14 @@ test('installer uses fake homes, keeps other hooks/config, is idempotent and rem
   assert.equal(configure({ env: f.env, log }), 0);
   assert.deepEqual(Object.keys(hookConfigs('script').claude.hooks), ['SessionStart', 'UserPromptSubmit', 'Stop']);
   let parsed = JSON.parse(await fs.readFile(settings)); assert.equal(parsed.hooks.Stop.length, 2);
+  if (process.platform === 'win32') {
+    assert.equal(configure({ env: f.env, log, wsl: true }), 1);
+    assert.equal(configure({ env: f.env, log }), 0);
+    parsed = JSON.parse(await fs.readFile(settings));
+    assert.equal(parsed.hooks.Stop.length, 2);
+    assert.equal(parsed.hooks.Stop[1].hooks[0].shell, 'bash');
+    assert.match(parsed.hooks.Stop[1].hooks[0].command, /wslpath.*sync-wsl\.py/);
+  }
   await fs.appendFile(toml, '# unrelated later edit\n');
   assert.equal(configure({ env: f.env, remove: true, log }), 2);
   assert.equal(configure({ env: f.env, remove: true, log }), 0);

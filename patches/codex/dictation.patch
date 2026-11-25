@@ -1098,7 +1098,7 @@ diff --git a/codex-rs/tui/src/chatwidget/realtime.rs b/codex-rs/tui/src/chatwidg
 index cdffddc..bea843d 100644
 --- a/codex-rs/tui/src/chatwidget/realtime.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime.rs
-@@ -136,12 +136,45 @@ enum StartupRetry {
+@@ -136,12 +136,46 @@ enum StartupRetry {
      Used,
  }
  
@@ -1138,6 +1138,7 @@ index cdffddc..bea843d 100644
 +    dictation: bool,
 +    dictation_retry_used: bool,
 +    dictation_partial: String,
++    dictation_retired_partial: Option<String>,
 +    dictation_new_segment: bool,
 +    dictation_sent_bytes: usize,
 +    speaker_muted: bool,
@@ -1243,7 +1244,7 @@ index cdffddc..bea843d 100644
          self.invalidate_realtime_voice_input();
          if self.realtime_conversation.phase == RealtimeConversationPhase::Active {
              self.realtime_conversation.pending_typed_input = Some(text.to_string());
-@@ -1315,6 +1396,37 @@ impl ChatWidget {
+@@ -1315,6 +1396,40 @@ impl ChatWidget {
      }
  
      pub(super) fn on_realtime_transcript_delta(&mut self, role: String, delta: String) {
@@ -1259,7 +1260,10 @@ index cdffddc..bea843d 100644
 +                    voice.dictation_retry_used = false;
 +                }
 +                if std::mem::take(&mut voice.dictation_new_segment) {
-+                    voice.dictation_partial.clear();
++                    if !voice.dictation_partial.is_empty() {
++                        voice.dictation_retired_partial =
++                            Some(std::mem::take(&mut voice.dictation_partial));
++                    }
 +                    voice.dictation_sent_bytes = 0;
 +                }
 +                let mut visible = delta.as_str();
@@ -1281,7 +1285,7 @@ index cdffddc..bea843d 100644
          if self.realtime_conversation.phase == RealtimeConversationPhase::Inactive
              && !self.realtime_conversation.recover_late_transcripts
          {
-@@ -1458,6 +1570,55 @@ impl ChatWidget {
+@@ -1458,6 +1570,68 @@ impl ChatWidget {
      }
  
      pub(super) fn on_realtime_transcript_done(&mut self, role: String, mut text: String) {
@@ -1294,6 +1298,12 @@ index cdffddc..bea843d 100644
 +                let voice = &mut self.realtime_conversation;
 +                if !text.trim().is_empty() {
 +                    voice.dictation_retry_used = false;
++                    if voice.dictation_retired_partial.as_deref().is_some_and(|partial| {
++                        dictation_prefix_end(&text, partial).is_some()
++                    }) {
++                        voice.dictation_retired_partial = None;
++                        return;
++                    }
 +                    let matches_partial =
 +                        dictation_prefix_end(&text, &voice.dictation_partial).is_some();
 +                    if voice.dictation_partial.is_empty()
@@ -1303,6 +1313,13 @@ index cdffddc..bea843d 100644
 +                        voice.dictation_sent_bytes = 0;
 +                        voice.dictation_new_segment = false;
 +                        self.bottom_pane.append_dictation(text.trim(), true);
++                    } else if voice.dictation_sent_bytes == 0
++                        && voice.dictation_retired_partial.is_none()
++                        && !voice.dictation_new_segment
++                    {
++                        let partial = std::mem::take(&mut voice.dictation_partial);
++                        self.bottom_pane
++                            .finish_dictation(partial.trim_start(), text.trim_start());
 +                    } else if matches_partial
 +                        && let Some(final_sent_end) = dictation_prefix_end(
 +                            &text,
@@ -1337,12 +1354,13 @@ index cdffddc..bea843d 100644
          if matches!(
              self.realtime_conversation.phase,
              RealtimeConversationPhase::Inactive | RealtimeConversationPhase::Stopping
-@@ -1688,6 +1849,11 @@ impl ChatWidget {
+@@ -1688,6 +1849,12 @@ impl ChatWidget {
      }
  
      fn finish_realtime_partial_transcripts(&mut self) {
 +        if self.realtime_conversation.dictation {
 +            self.realtime_conversation.dictation_partial.clear();
++            self.realtime_conversation.dictation_retired_partial = None;
 +            self.realtime_conversation.dictation_sent_bytes = 0;
 +            return;
 +        }
@@ -1632,7 +1650,7 @@ diff --git a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs b/cod
 index 7a3b2a0..48204b0 100644
 --- a/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
 +++ b/codex-rs/tui/src/chatwidget/realtime_tests/handoff_privacy.rs
-@@ -29,6 +29,206 @@ fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question:
+@@ -29,6 +29,247 @@ fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question:
      );
  }
  
@@ -1732,6 +1750,47 @@ index 7a3b2a0..48204b0 100644
 +    assert!(!chat.input_queue.has_queued_follow_up_messages());
 +    chat.on_realtime_transcript_done("user".into(), format!("{first}{second} {third}."));
 +    assert_eq!(chat.bottom_pane.composer_text(), format!("{third}."));
++}
++
++#[tokio::test]
++async fn dictation_accepts_final_word_corrections_before_enter() {
++    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
++    for (partial, final_text) in [("проверь BD", "Проверь БД."), ("АБД", "А, БД?")] {
++        let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
++        activate_voice(&mut chat);
++        chat.realtime_conversation.dictation = true;
++        chat.bottom_pane.append_dictation("Предыдущая фраза.", true);
++        chat.on_realtime_transcript_delta("user".into(), partial.into());
++        chat.on_realtime_transcript_done("user".into(), final_text.into());
++        assert_eq!(
++            chat.bottom_pane.composer_text(),
++            format!("Предыдущая фраза. {final_text}")
++        );
++
++        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
++        let AppCommand::UserTurn { items, .. } = ops.try_recv().unwrap() else {
++            panic!("a corrected draft should send immediately");
++        };
++        assert!(
++            matches!(&items[..], [UserInput::Text { text, .. }] if text == &format!("Предыдущая фраза. {final_text}"))
++        );
++        assert_eq!(chat.bottom_pane.composer_text(), "");
++    }
++}
++
++#[tokio::test]
++async fn dictation_does_not_replace_a_new_segment_with_a_late_final() {
++    let (mut chat, _sender, _events, _ops) = make_chatwidget_manual_with_sender().await;
++    activate_voice(&mut chat);
++    chat.realtime_conversation.dictation = true;
++    chat.on_realtime_transcript_delta("user".into(), "первая фраза".into());
++    chat.realtime_conversation.dictation_new_segment = true;
++    chat.on_realtime_transcript_delta("user".into(), "проверь BD".into());
++
++    chat.on_realtime_transcript_done("user".into(), "Первая фраза.".into());
++    assert_eq!(chat.bottom_pane.composer_text(), "первая фраза проверь BD");
++    chat.on_realtime_transcript_done("user".into(), "Проверь БД.".into());
++    assert_eq!(chat.bottom_pane.composer_text(), "первая фраза Проверь БД.");
 +}
 +
 +#[tokio::test]
