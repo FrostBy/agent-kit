@@ -40,6 +40,7 @@ async function renderNative(snapshot, config, now = Date.now(), sources = {}) {
     : { waiting_approval: 'awaits approval', waiting_input: 'awaits reply', failed: 'failed' };
   const activity = snapshot.activity ? {
     ...snapshot.activity,
+    agents: undefined,
     tool: snapshot.activity.tool?.name === 'exec' && typeof snapshot.activity.tool.detail === 'string'
       ? { ...snapshot.activity.tool, detail: execDetail(snapshot.activity.tool.detail) } : snapshot.activity.tool,
     agent_attention: (Array.isArray(snapshot.activity.agent_attention) ? snapshot.activity.agent_attention : [])

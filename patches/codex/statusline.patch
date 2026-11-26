@@ -242,13 +242,26 @@ index c9d4585..b6c77d6 100644
          &mut self,
          app_server: &AppServerSession,
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index eeebcba..8737ac9 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -2080,6 +2080,14 @@ impl App {
+@@ -1089,6 +1089,12 @@
+                     self.transcript_view.history = if self.scrollback_has_older_history { TranscriptHistoryState::Partial } else { TranscriptHistoryState::Complete };
+                 }
+                 self.finish_initial_history_replay_buffer(tui);
++                if let Some(root) = self.primary_thread_id
++                    && self.chat_widget.thread_id() == Some(root)
++                    && !self.reconnect.offline
++                {
++                    self.refresh_agent_picker_threads(app_server, root);
++                }
+             }
+             AppEvent::ConsolidateAgentMessage {
+                 phase,
+@@ -2079,6 +2085,14 @@
+             }
              AppEvent::RefreshStatusLineWorkspaceHeadline { request_id } => {
                  self.refresh_status_line_workspace_headline(app_server, request_id);
-             }
++            }
 +            AppEvent::RefreshStatusLineCommand {
 +                request_id,
 +                config,
@@ -256,25 +269,24 @@ index eeebcba..8737ac9 100644
 +                cwd,
 +            } => {
 +                self.refresh_status_line_command(request_id, config, payload, cwd);
-+            }
+             }
              AppEvent::OpenThreadGoalMenu { thread_id } => {
                  self.open_thread_goal_menu(app_server, thread_id).await;
-             }
-@@ -3788,6 +3796,14 @@ impl App {
-                     tui.frame_requester().schedule_frame();
-                 }
-             }
-+            AppEvent::StatusLineCommandUpdated { request_id, result } => {
-+                if self
-+                    .chat_widget
-+                    .set_status_line_command_output(request_id, result)
+@@ -3784,6 +3798,14 @@
+                 if self
+                     .chat_widget
+                     .set_status_line_workspace_headline(request_id, result)
 +                {
 +                    tui.frame_requester().schedule_frame();
 +                }
 +            }
-             AppEvent::StatusLineSetupCancelled => {
-                 self.chat_widget.cancel_status_line_setup();
-                 self.chat_widget.refresh_config_panel(/*notice*/ None);
++            AppEvent::StatusLineCommandUpdated { request_id, result } => {
++                if self
++                    .chat_widget
++                    .set_status_line_command_output(request_id, result)
+                 {
+                     tui.frame_requester().schedule_frame();
+                 }
 diff --git a/codex-rs/tui/src/app/side_pane.rs b/codex-rs/tui/src/app/side_pane.rs
 index fa8dbaa..f8039c8 100644
 --- a/codex-rs/tui/src/app/side_pane.rs
@@ -2544,3 +2556,1223 @@ index c51f429..6786966 100644
                  window_minutes: Some(10_080),
              }),
              credits: None,
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -202,6 +202,7 @@
+ mod agent_navigation;
+ mod agent_picker;
+ mod agent_status_feed;
++mod agent_tree;
+ #[cfg(any(unix, windows))]
+ mod agents_overview;
+ mod agents_overview_actions;
+@@ -890,7 +891,8 @@
+         tui.link_hover.observe(&event);
+         let current = tui.link_hover.position();
+         if previous != current
+-            && self.hovered_sidebar_target(previous) != self.hovered_sidebar_target(current)
++            && (self.hovered_sidebar_target(previous) != self.hovered_sidebar_target(current)
++                || self.agent_tree_target(previous) != self.agent_tree_target(current))
+         {
+             tui.frame_requester().schedule_frame();
+         }
+@@ -1081,6 +1083,21 @@
+             return Ok(AppRunControl::Continue);
+         }
+         if Box::pin(self.handle_sidebar_input(tui, app_server, &event)).await {
++            return Ok(AppRunControl::Continue);
++        }
++        if let TuiEvent::Mouse(press) = &event
++            && press.kind == MouseEventKind::Down(MouseButton::Left)
++            && press.modifiers.is_empty()
++            && tui.is_owned_screen()
++            && let Some(thread_id) = self.agent_tree_target(Some((press.column, press.row).into()))
++        {
++            let painted_size = tui.terminal.last_known_screen_size;
++            if tui.prepare_draw_size()? == painted_size {
++                self.conversation_frame.agent_tree.clear();
++                self.cancel_primed_browsing_for_event(&event);
++                self.select_agent_thread(tui, app_server, thread_id).await?;
++            }
++            tui.frame_requester().schedule_frame();
+             return Ok(AppRunControl::Continue);
+         }
+         if let TuiEvent::Mouse(press) = &event
+@@ -1431,6 +1448,9 @@
+     fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui, screen_size: Size) -> Result<Rect> {
+         self.chat_widget
+             .set_sparkle_terminal_focus(tui.is_terminal_focused());
++        if let Some(delay) = self.agent_tree_update_delay(Instant::now()) {
++            tui.frame_requester().schedule_frame_in(delay);
++        }
+         if tui.is_owned_screen() {
+             return self.render_owned_transcript(tui, screen_size);
+         }
+@@ -1448,12 +1468,15 @@
+             &mut self.agents_overview.rendered_full_screen,
+             dashboard_visible,
+         );
++        let tree = self.agent_tree(screen_size.into());
++        let tree_height = tree.len() as u16;
+         // Full-height inline overlays scroll history off screen without a terminal resize.
+         // Rebuild it once when returning to a content-height chat viewport.
+         let restoring_inline_viewport = !tui.is_alt_screen_active()
+             && tui.terminal.viewport_area.height == screen_size.height
+-            && self.with_chat_widget_frame(screen_size.width, |height, _| height)
+-                < screen_size.height;
++            && self.with_chat_widget_frame(screen_size.width, |height, _| {
++                height.saturating_add(tree_height)
++            }) < screen_size.height;
+         if !dashboard_visible && (dashboard_was_visible || restoring_inline_viewport) {
+             self.schedule_immediate_resize_reflow(tui);
+             self.maybe_run_resize_reflow(tui, screen_size)?;
+@@ -1463,12 +1486,16 @@
+             let desired_height = if dashboard_visible {
+                 screen_size.height
+             } else {
+-                desired_height
++                desired_height.saturating_add(tree_height)
+             };
+             let mut rendered_area = Rect::default();
+             tui.draw_with_resize_reflow(desired_height, screen_size, hud, |frame| {
+-                let area = frame.area();
++                let mut area = frame.area();
+                 rendered_area = area;
++                if tree_height < area.height {
++                    area.height -= tree_height;
++                    agent_tree::paint(&tree, area, None, frame.buffer);
++                }
+                 chat_widget.render(area, frame.buffer);
+                 if let Some(previews) = &self.chat_widget.composer_images {
+                     frame.image_placements = previews.placements.take();
+diff --git a/codex-rs/tui/src/app/agent_navigation.rs b/codex-rs/tui/src/app/agent_navigation.rs
+--- a/codex-rs/tui/src/app/agent_navigation.rs
++++ b/codex-rs/tui/src/app/agent_navigation.rs
+@@ -50,6 +50,8 @@
+     /// Spawned child threads whose instructions are owned by their parent agent.
+     parent_owned_threads: HashSet<ThreadId>,
+     picker_excluded_threads: HashSet<ThreadId>,
++    parents: HashMap<ThreadId, ThreadId>,
++    pub(super) tree_activity: HashMap<ThreadId, super::agent_tree::AgentTreeActivity>,
+     /// Inactive threads with an approval outstanding in their event store.
+     pub(super) pending_approvals: HashSet<ThreadId>,
+     /// Thread IDs in the currently rendered picker, so a refresh can restore its cursor by ID.
+@@ -236,6 +238,18 @@
+         }
+     }
+
++    pub(super) fn set_parent(&mut self, child: ThreadId, parent: Option<ThreadId>) {
++        if let Some(parent) = parent
++            && child != parent
++        {
++            self.parents.insert(child, parent);
++        }
++    }
++
++    pub(super) fn parent(&self, child: ThreadId) -> Option<ThreadId> {
++        self.parents.get(&child).copied()
++    }
++
+     pub(crate) fn set_agent_path(&mut self, thread_id: ThreadId, agent_path: Option<String>) {
+         if let Some(agent_path) = agent_path
+             && let Some(entry) = self.threads.get_mut(&thread_id)
+@@ -271,6 +285,8 @@
+         self.order.clear();
+         self.stopped_threads.clear();
+         self.parent_owned_threads.clear();
++        self.parents.clear();
++        self.tree_activity.clear();
+         self.picker_excluded_threads.clear();
+         self.pending_approvals.clear();
+         self.picker_row_ids.clear();
+@@ -287,6 +303,8 @@
+         self.order.retain(|candidate| *candidate != thread_id);
+         self.stopped_threads.remove(&thread_id);
+         self.parent_owned_threads.remove(&thread_id);
++        self.parents.remove(&thread_id);
++        self.tree_activity.remove(&thread_id);
+         self.picker_excluded_threads.remove(&thread_id);
+     }
+
+diff --git a/codex-rs/tui/src/app/agent_tree.rs b/codex-rs/tui/src/app/agent_tree.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/tui/src/app/agent_tree.rs
+@@ -0,0 +1,860 @@
++use super::App;
++use codex_app_server_protocol::ServerNotification;
++use codex_app_server_protocol::SubAgentActivityKind;
++use codex_app_server_protocol::ThreadActiveFlag;
++use codex_app_server_protocol::ThreadItemPayload;
++use codex_app_server_protocol::ThreadStatus;
++use codex_app_server_protocol::TurnStatus;
++use codex_protocol::ThreadId;
++use codex_utils_elapsed::format_duration;
++use ratatui::buffer::Buffer;
++use ratatui::layout::Position;
++use ratatui::layout::Rect;
++use ratatui::style::Color;
++use ratatui::style::Stylize;
++use ratatui::text::Line;
++use ratatui::text::Span;
++use ratatui::widgets::Widget;
++use std::collections::HashMap;
++use std::collections::HashSet;
++use std::time::Duration;
++use std::time::Instant;
++
++const COMPLETION_GRACE: Duration = Duration::from_secs(30);
++const FINISHED_AGENTS_HINT: &str = "/subagents to see finished agents";
++
++#[derive(Debug, Default)]
++pub(super) struct AgentTreeActivity {
++    started: Option<Instant>,
++    finished: Option<(TurnStatus, Instant)>,
++    summary: Option<String>,
++    tokens: Option<i64>,
++    waiting: Option<&'static str>,
++}
++
++impl AgentTreeActivity {
++    fn finish(&mut self, status: TurnStatus, now: Instant) -> bool {
++        if status == TurnStatus::InProgress
++            || self
++                .finished
++                .as_ref()
++                .is_some_and(|(previous, _)| *previous == status)
++        {
++            return false;
++        }
++        self.finished = Some((status, now));
++        self.waiting = None;
++        true
++    }
++
++    fn metrics(&self, now: Instant) -> String {
++        let mut parts = Vec::new();
++        if let Some(waiting) = self.waiting {
++            parts.push(waiting.into());
++        }
++        if let Some((status, _)) = &self.finished {
++            match status {
++                TurnStatus::Failed => parts.push("failed".into()),
++                TurnStatus::Interrupted => parts.push("stopped".into()),
++                _ => {}
++            }
++        }
++        if let Some(started) = self.started {
++            let end = self.finished.as_ref().map_or(now, |(_, ended)| *ended);
++            parts.push(format_duration(end.saturating_duration_since(started)));
++        }
++        if let Some(tokens) = self.tokens.filter(|tokens| *tokens > 0) {
++            parts.push(format!(
++                "{} tokens",
++                crate::status::format_tokens_compact(tokens)
++            ));
++        }
++        parts.join(" · ")
++    }
++}
++
++impl App {
++    pub(super) fn update_agent_tree_activity(
++        &mut self,
++        id: ThreadId,
++        notification: &ServerNotification,
++        turn_stopped: bool,
++    ) {
++        if self.primary_thread_id == Some(id) || self.side_threads.contains_key(&id) {
++            return;
++        }
++        let Some(entry) = self.agent_navigation.get(&id) else {
++            return;
++        };
++        let running = entry.is_running;
++        let now = Instant::now();
++        let liveness_changed = if let ServerNotification::ThreadStatusChanged(event) = notification
++        {
++            // A newly attached TUI can see status notifications before it watches a child turn.
++            let reported_running = matches!(event.status, ThreadStatus::Active { .. });
++            if running != reported_running {
++                if reported_running {
++                    self.agent_navigation.mark_running(id);
++                } else {
++                    self.agent_navigation.mark_stopped(id);
++                }
++                self.agent_navigation
++                    .get(&id)
++                    .is_some_and(|entry| entry.is_running != running)
++            } else {
++                false
++            }
++        } else {
++            false
++        };
++        let state = self.agent_navigation.tree_activity.entry(id).or_default();
++        if liveness_changed && !running {
++            state.started = Some(now);
++            state.finished = None;
++            state.summary = None;
++            state.waiting = None;
++        }
++        let redraw = match notification {
++            ServerNotification::TurnStarted(event) => {
++                state.started = Some(
++                    event
++                        .turn
++                        .started_at
++                        .and_then(|started| chrono::Utc::now().timestamp().checked_sub(started))
++                        .and_then(|seconds| u64::try_from(seconds).ok())
++                        .and_then(|seconds| now.checked_sub(Duration::from_secs(seconds)))
++                        .unwrap_or(now),
++                );
++                state.finished = None;
++                state.summary = None;
++                state.waiting = None;
++                true
++            }
++            ServerNotification::TurnCompleted(event) if turn_stopped => {
++                state.finish(event.turn.status.clone(), now)
++            }
++            ServerNotification::ThreadStatusChanged(event) => {
++                if matches!(event.status, ThreadStatus::SystemError)
++                    && running
++                    && state.finished.is_none()
++                {
++                    state.finish(TurnStatus::Failed, now)
++                } else {
++                    let waiting = match &event.status {
++                        ThreadStatus::Active { active_flags }
++                            if active_flags.contains(&ThreadActiveFlag::WaitingOnApproval) =>
++                        {
++                            Some("awaiting approval")
++                        }
++                        ThreadStatus::Active { active_flags }
++                            if active_flags.contains(&ThreadActiveFlag::WaitingOnUserInput) =>
++                        {
++                            Some("awaiting input")
++                        }
++                        _ => None,
++                    };
++                    let changed = state.waiting != waiting;
++                    state.waiting = waiting;
++                    changed
++                }
++            }
++            ServerNotification::ThreadTokenUsageUpdated(event) => {
++                let tokens = Some(event.token_usage.total.total_tokens);
++                let changed = state.tokens != tokens;
++                state.tokens = tokens;
++                changed
++            }
++            ServerNotification::ItemStarted(event) => {
++                Self::update_agent_tree_summary(state, &event.item.payload)
++            }
++            ServerNotification::ItemCompleted(event) => {
++                Self::update_agent_tree_summary(state, &event.item.payload)
++            }
++            _ => false,
++        };
++        if redraw || liveness_changed {
++            self.chat_widget.request_redraw();
++        }
++    }
++
++    fn update_agent_tree_summary(state: &mut AgentTreeActivity, item: &ThreadItemPayload) -> bool {
++        let summary = match item {
++            ThreadItemPayload::CommandExecution { .. } => Some("Shell command".into()),
++            _ => super::agent_status_feed::activity_summary(item),
++        };
++        let Some(summary) = summary else {
++            return false;
++        };
++        let summary = summary.replace(char::is_control, " ");
++        if state.summary.as_deref() == Some(summary.as_str()) {
++            return false;
++        }
++        state.summary = Some(summary);
++        true
++    }
++
++    pub(super) fn update_agent_tree_spawn_activity(
++        &mut self,
++        id: ThreadId,
++        item: &ThreadItemPayload,
++    ) {
++        let ThreadItemPayload::SubAgentActivity { kind, .. } = item else {
++            return;
++        };
++        let running = self
++            .agent_navigation
++            .get(&id)
++            .is_some_and(|entry| entry.is_running);
++        let now = Instant::now();
++        let state = self.agent_navigation.tree_activity.entry(id).or_default();
++        match kind {
++            SubAgentActivityKind::Started if running => {
++                state.started.get_or_insert(now);
++            }
++            SubAgentActivityKind::Completed if state.finished.is_none() => {
++                state.finish(TurnStatus::Completed, now);
++            }
++            SubAgentActivityKind::Interrupted if state.finished.is_none() => {
++                state.finish(TurnStatus::Interrupted, now);
++            }
++            _ => {}
++        }
++    }
++
++    pub(super) fn agent_tree_update_delay(&self, now: Instant) -> Option<Duration> {
++        if self.overlay.is_some() || !self.chat_widget.no_modal_or_popup_active() {
++            return None;
++        }
++        let navigation = &self.agent_navigation;
++        navigation
++            .tree_activity
++            .iter()
++            .filter_map(|(id, state)| {
++                if let Some((_, ended)) = state.finished.as_ref() {
++                    let expires = *ended + COMPLETION_GRACE;
++                    return (expires > now).then(|| expires - now);
++                }
++                navigation
++                    .get(id)
++                    .is_some_and(|entry| entry.is_running && !entry.is_closed)
++                    .then_some(Duration::from_secs(1))
++            })
++            .min()
++    }
++
++    pub(super) fn agent_tree(&self, area: Rect) -> Vec<(Option<ThreadId>, Line<'static>)> {
++        let Some(main) = self.primary_thread_id else {
++            return Vec::new();
++        };
++        if area.width < 8
++            || area.height < 6
++            || self.overlay.is_some()
++            || !self.chat_widget.no_modal_or_popup_active()
++        {
++            return Vec::new();
++        }
++
++        let navigation = &self.agent_navigation;
++        let current = self.current_displayed_thread_id();
++        let agents: Vec<_> = navigation
++            .visible_threads()
++            .into_iter()
++            .filter(|(id, _)| *id != main && !self.side_threads.contains_key(id))
++            .collect();
++        let paths: HashMap<_, _> = agents
++            .iter()
++            .filter_map(|(id, entry)| Some((entry.agent_path.as_deref()?, *id)))
++            .collect();
++        let root_path = navigation
++            .get(&main)
++            .and_then(|entry| entry.agent_path.as_deref())
++            .unwrap_or("/root");
++
++        let mut parents = HashMap::new();
++        for &(id, entry) in &agents {
++            let parent = navigation.parent(id).or_else(|| {
++                // V2 activity can arrive before the thread metadata with its parent ID.
++                let (path, _) = entry.agent_path.as_deref()?.rsplit_once('/')?;
++                if path == root_path {
++                    Some(main)
++                } else {
++                    paths.get(path).copied()
++                }
++            });
++            if let Some(parent) = parent
++                && parent != id
++            {
++                parents.insert(id, parent);
++            }
++        }
++
++        let mut path = vec![current.unwrap_or(main)];
++        while *path.last().unwrap_or(&main) != main {
++            let Some(parent) = parents.get(path.last().unwrap_or(&main)).copied() else {
++                break;
++            };
++            if path.contains(&parent) {
++                break;
++            }
++            path.push(parent);
++        }
++        if path.last() != Some(&main) {
++            path = vec![main];
++        }
++        path.reverse();
++
++        let now = Instant::now();
++        let visible: HashSet<_> = agents
++            .iter()
++            .filter(|(id, entry)| {
++                let finished = navigation
++                    .tree_activity
++                    .get(id)
++                    .and_then(|state| state.finished.as_ref());
++                let active = finished.is_none() && entry.is_running && !entry.is_closed;
++                let grace = finished.is_some_and(|(status, ended)| {
++                    *status != TurnStatus::Completed
++                        && now.saturating_duration_since(*ended) < COMPLETION_GRACE
++                });
++                active || grace || path.contains(id) || navigation.pending_approvals.contains(id)
++            })
++            .map(|(id, _)| *id)
++            .collect();
++        let mut children = HashMap::<ThreadId, Vec<ThreadId>>::new();
++        for (id, _) in agents {
++            if !visible.contains(&id) {
++                continue;
++            }
++            // A running descendant remains reachable when its parent leaves the footer.
++            let parent = std::iter::successors(parents.get(&id).copied(), |parent| {
++                parents.get(parent).copied()
++            })
++            .take(parents.len())
++            .find(|parent| *parent == main || visible.contains(parent));
++            if let Some(parent) = parent {
++                children.entry(parent).or_default().push(id);
++            }
++        }
++        let hint = navigation.tree_activity.values().any(|state| {
++            state.finished.as_ref().is_some_and(|(status, ended)| {
++                *status == TurnStatus::Completed
++                    && now.saturating_duration_since(*ended) < COMPLETION_GRACE
++            })
++        });
++
++        let width = usize::from(area.width - 2);
++        let fit = |line, width| {
++            crate::line_truncation::truncate_line_with_ellipsis_if_overflow(line, width)
++        };
++        let secondary = crate::style::secondary_text_style();
++        let secondary = if secondary.fg == Some(Color::Reset) {
++            secondary.dim()
++        } else {
++            secondary
++        };
++        let style_row = |line: Line<'static>, id| {
++            let line = if current == Some(id) {
++                line.bold()
++            } else {
++                line.style(secondary)
++            };
++            if navigation.pending_approvals.contains(&id)
++                || navigation
++                    .tree_activity
++                    .get(&id)
++                    .is_some_and(|state| state.waiting.is_some())
++            {
++                line.yellow()
++            } else {
++                line
++            }
++        };
++        let hint_row = || {
++            (
++                None,
++                fit(Line::raw(FINISHED_AGENTS_HINT), width).style(secondary),
++            )
++        };
++        if !children.contains_key(&main) {
++            return if hint { vec![hint_row()] } else { Vec::new() };
++        }
++        let row = |id, depth: usize, last, expanded| {
++            let branch = if depth == 0 {
++                ""
++            } else if last {
++                "└─ "
++            } else {
++                "├─ "
++            };
++            let indent = " ".repeat((depth.saturating_sub(1) * 2).min(width.saturating_sub(8)));
++            let mark = if current == Some(id) { "●" } else { "○" };
++            let count = if expanded {
++                0
++            } else {
++                descendant_count(id, &children)
++            };
++            let suffix = if count > 0 {
++                format!(" (+{count})")
++            } else {
++                String::new()
++            };
++            let mut line = Line::raw(format!(
++                "{indent}{branch}{mark} {}",
++                self.agent_tree_label(id)
++            ));
++            let state = navigation.tree_activity.get(&id);
++            let metrics = state.map_or_else(String::new, |state| state.metrics(now));
++            let metrics_width = Line::raw(metrics.as_str()).width();
++            let show_metrics = metrics_width > 0 && metrics_width + suffix.len() + 10 <= width;
++            let label_width = if show_metrics {
++                width - metrics_width - 2
++            } else {
++                width
++            };
++            if suffix.len() + 1 < label_width {
++                line = fit(line, label_width - suffix.len());
++                if !suffix.is_empty() {
++                    line.spans.push(Span::raw(suffix));
++                }
++            } else {
++                line = fit(line, label_width);
++            }
++            if let Some(summary) = state.and_then(|state| state.summary.as_deref())
++                && line.width() + 6 <= label_width
++            {
++                let summary = fit(
++                    Line::raw(format!("  {summary}")),
++                    label_width - line.width(),
++                );
++                line.spans.extend(summary.spans);
++            }
++            if show_metrics {
++                let gap = width - metrics_width - line.width();
++                line.spans
++                    .push(Span::raw(format!("{}{metrics}", " ".repeat(gap))));
++            }
++            (Some(id), style_row(line, id))
++        };
++
++        let root = if current == Some(main) {
++            "● main"
++        } else {
++            "○ main"
++        };
++        let mut rows = vec![(Some(main), style_row(Line::raw(root), main))];
++        let focused = path.pop().unwrap_or(main);
++        let parent = path.last().copied().unwrap_or(main);
++        let depth = path.len().saturating_sub(1);
++        for (depth, ancestor) in path.into_iter().skip(1).enumerate() {
++            rows.push(row(ancestor, depth, true, true));
++        }
++        let peers = children.get(&parent).map(Vec::as_slice).unwrap_or_default();
++        for (index, &id) in peers.iter().enumerate() {
++            let last = index + 1 == peers.len();
++            rows.push(row(id, depth, last, id == focused));
++            if id == focused
++                && let Some(items) = children.get(&id)
++            {
++                for (index, &child) in items.iter().enumerate() {
++                    rows.push(row(child, depth + 1, index + 1 == items.len(), false));
++                }
++            }
++        }
++
++        let max_rows = usize::from((area.height / 3).max(3));
++        if rows.len() > max_rows {
++            let focused_index = rows
++                .iter()
++                .position(|(id, _)| *id == Some(focused))
++                .unwrap_or(0);
++            // Keep main and the focused row accessible in a short terminal.
++            let skipped = focused_index.saturating_sub(max_rows - 2);
++            rows.drain(1..1 + skipped);
++            rows.truncate(max_rows - 1);
++            rows.push((None, fit(Line::raw("… /subagents"), width).dim()));
++        } else if hint && rows.len() < max_rows {
++            rows.push(hint_row());
++        }
++        rows
++    }
++
++    fn agent_tree_label(&self, id: ThreadId) -> String {
++        self.agent_navigation
++            .get(&id)
++            .and_then(|entry| entry.agent_path.as_deref())
++            .and_then(|path| path.rsplit_once('/').map(|(_, name)| name))
++            .filter(|name| !name.is_empty())
++            .map(str::to_owned)
++            .unwrap_or_else(|| self.thread_label(id))
++            .replace(char::is_control, " ")
++    }
++
++    pub(super) fn agent_tree_target(&self, point: Option<Position>) -> Option<ThreadId> {
++        let point = point?;
++        let rows = &self.conversation_frame.agent_tree;
++        let (_, main) = rows.first()?;
++        if self.primary_thread_id != Some(*main)
++            || self.overlay.is_some()
++            || !self.chat_widget.no_modal_or_popup_active()
++            || self.transcript_view.is_select_mode()
++        {
++            return None;
++        }
++        rows.iter()
++            .find_map(|(area, id)| area.contains(point).then_some(*id))
++    }
++}
++
++fn descendant_count(id: ThreadId, children: &HashMap<ThreadId, Vec<ThreadId>>) -> usize {
++    let mut pending = vec![id];
++    let mut count = 0;
++    while let Some(parent) = pending.pop() {
++        if let Some(items) = children.get(&parent) {
++            count += items.len();
++            pending.extend_from_slice(items);
++        }
++    }
++    count
++}
++
++pub(super) fn paint(
++    rows: &[(Option<ThreadId>, Line<'static>)],
++    conversation: Rect,
++    pointer: Option<Position>,
++    buffer: &mut Buffer,
++) -> Vec<(Rect, ThreadId)> {
++    rows.iter()
++        .enumerate()
++        .filter_map(|(index, (thread, line))| {
++            let area = Rect::new(
++                conversation.x + 1,
++                conversation.bottom() + index as u16,
++                (line.width() as u16).min(conversation.width.saturating_sub(2)),
++                1,
++            );
++            if thread.is_some() && pointer.is_some_and(|point| area.contains(point)) {
++                line.clone()
++                    .style(crate::style::hover_style(line.style))
++                    .render(area, buffer);
++            } else {
++                line.render(area, buffer);
++            }
++            thread.map(|id| (area, id))
++        })
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use ratatui::style::Modifier;
++
++    #[tokio::test]
++    async fn background_events_update_metrics_and_retire_rows_without_closing_history()
++    -> color_eyre::eyre::Result<()> {
++        use codex_app_server_protocol::ItemStartedNotification;
++        use codex_app_server_protocol::ThreadStatusChangedNotification;
++        use codex_app_server_protocol::ThreadTokenUsage;
++        use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
++        use codex_app_server_protocol::TokenUsageBreakdown;
++        use codex_app_server_protocol::Turn;
++        use codex_app_server_protocol::TurnCompletedNotification;
++        use codex_app_server_protocol::TurnStartedNotification;
++
++        let mut app = crate::app::test_support::make_test_app().await;
++        let (main, review, detail) = (ThreadId::new(), ThreadId::new(), ThreadId::new());
++        app.primary_thread_id = Some(main);
++        app.active_thread_id = Some(main);
++        for (id, path) in [(review, "/root/review"), (detail, "/root/review/detail")] {
++            app.agent_navigation.upsert(id, None, None, false);
++            app.agent_navigation.set_agent_path(id, Some(path.into()));
++            app.agent_navigation.mark_running(id);
++        }
++        let turn = |status| Turn {
++            id: "review-turn".into(),
++            root_turn_id: None,
++            items: vec![],
++            items_view: Default::default(),
++            status,
++            error: None,
++            started_at: None,
++            completed_at: None,
++            duration_ms: None,
++        };
++        let started = || {
++            ServerNotification::TurnStarted(TurnStartedNotification {
++                thread_id: review.to_string(),
++                turn: turn(TurnStatus::InProgress),
++            })
++        };
++        app.enqueue_thread_notification(review, started()).await?;
++        let usage = TokenUsageBreakdown {
++            total_tokens: 2400,
++            input_tokens: 2000,
++            cached_input_tokens: 0,
++            cache_write_input_tokens: 0,
++            output_tokens: 400,
++            reasoning_output_tokens: 0,
++        };
++        app.enqueue_thread_notification(
++            review,
++            ServerNotification::ThreadTokenUsageUpdated(ThreadTokenUsageUpdatedNotification {
++                thread_id: review.to_string(),
++                turn_id: "review-turn".into(),
++                token_usage: ThreadTokenUsage {
++                    total: usage.clone(),
++                    last: usage,
++                    model_context_window: None,
++                },
++            }),
++        )
++        .await?;
++        let view = Rect::new(0, 0, 92, 24);
++        app.enqueue_thread_notification(
++            review,
++            ServerNotification::ItemStarted(ItemStartedNotification::new(
++                review.to_string(),
++                "review-turn".into(),
++                ThreadItemPayload::Reasoning {
++                    id: "reason".into(),
++                    summary: vec!["Inspect tests".into()],
++                    content: vec![],
++                },
++                /*started_at_ms*/ 0,
++            )),
++        )
++        .await?;
++        let rows = app.agent_tree(view);
++        let row = rows[1].1.to_string();
++        assert!(row.contains("review (+1)"));
++        assert!(row.contains("Inspect tests"));
++        assert!(row.ends_with("2.4K tokens"));
++        assert_eq!(
++            app.agent_tree_update_delay(Instant::now()),
++            Some(Duration::from_secs(1))
++        );
++
++        app.enqueue_thread_notification(
++            review,
++            ServerNotification::ThreadStatusChanged(ThreadStatusChangedNotification {
++                thread_id: review.to_string(),
++                status: ThreadStatus::Active {
++                    active_flags: vec![ThreadActiveFlag::WaitingOnUserInput],
++                },
++            }),
++        )
++        .await?;
++        assert!(
++            app.agent_tree(view)[1]
++                .1
++                .to_string()
++                .contains("awaiting input")
++        );
++
++        let finish = |status| {
++            ServerNotification::TurnCompleted(TurnCompletedNotification {
++                thread_id: review.to_string(),
++                turn: turn(status),
++            })
++        };
++        app.enqueue_thread_notification(review, finish(TurnStatus::Completed))
++            .await?;
++        let rows = app.agent_tree(view);
++        assert_eq!(
++            rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
++            [Some(main), Some(detail), None]
++        );
++        assert_eq!(rows.last().unwrap().1.to_string(), FINISHED_AGENTS_HINT);
++        assert!(
++            app.agent_navigation
++                .visible_threads()
++                .iter()
++                .any(|(id, _)| *id == review)
++        );
++
++        app.active_thread_id = Some(review);
++        assert_eq!(app.agent_tree(view)[1].0, Some(review));
++        app.active_thread_id = Some(main);
++        app.enqueue_thread_notification(review, started()).await?;
++        app.enqueue_thread_notification(review, finish(TurnStatus::Failed))
++            .await?;
++        let rows = app.agent_tree(view);
++        assert!(rows[1].1.to_string().contains("failed"));
++        let now = Instant::now();
++        assert!(app.agent_tree_update_delay(now).is_some());
++        app.agent_navigation
++            .tree_activity
++            .get_mut(&review)
++            .unwrap()
++            .finished = Some((TurnStatus::Failed, now - COMPLETION_GRACE));
++        let rows = app.agent_tree(view);
++        assert_eq!(
++            rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
++            [Some(main), Some(detail)]
++        );
++        // This child was restored from metadata, without an attached turn stream.
++        let status_changed = |status| {
++            ServerNotification::ThreadStatusChanged(ThreadStatusChangedNotification {
++                thread_id: detail.to_string(),
++                status,
++            })
++        };
++        app.enqueue_thread_notification(detail, status_changed(ThreadStatus::Idle))
++            .await?;
++        assert!(app.agent_tree(view).is_empty());
++        app.enqueue_thread_notification(
++            detail,
++            status_changed(ThreadStatus::Active {
++                active_flags: vec![],
++            }),
++        )
++        .await?;
++        assert_eq!(app.agent_tree(view)[1].0, Some(detail));
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn agent_tree_counts_a_child_announced_by_a_background_parent()
++    -> color_eyre::eyre::Result<()> {
++        use codex_app_server_protocol::ItemStartedNotification;
++        use codex_app_server_protocol::ServerNotification;
++        use codex_app_server_protocol::SubAgentActivityKind;
++        use codex_app_server_protocol::ThreadItemPayload;
++
++        let mut app = crate::app::test_support::make_test_app().await;
++        let main = ThreadId::new();
++        let review = ThreadId::new();
++        let detail = ThreadId::new();
++        app.primary_thread_id = Some(main);
++        app.active_thread_id = Some(main);
++        app.agent_navigation.upsert(review, None, None, false);
++        app.agent_navigation.mark_running(review);
++        app.agent_navigation
++            .set_agent_path(review, Some("/root/review".into()));
++        let view = Rect::new(0, 0, 40, 24);
++        assert_eq!(app.agent_tree(view)[1].1.to_string(), "○ review");
++
++        app.enqueue_thread_notification(
++            review,
++            ServerNotification::ItemStarted(ItemStartedNotification::new(
++                review.to_string(),
++                "review-turn".into(),
++                ThreadItemPayload::SubAgentActivity {
++                    id: "spawn-detail".into(),
++                    kind: SubAgentActivityKind::Started,
++                    agent_thread_id: detail.to_string(),
++                    agent_path: "/root/review/detail".into(),
++                    model: None,
++                    reasoning_effort: None,
++                },
++                /*started_at_ms*/ 0,
++            )),
++        )
++        .await?;
++        let tree = app.agent_tree(view);
++        assert_eq!(tree.len(), 2);
++        assert!(tree[1].1.to_string().starts_with("○ review (+1)"));
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn agent_tree_shows_peers_children_and_collapsed_descendant_counts() {
++        let mut app = crate::app::test_support::make_test_app().await;
++        let main = ThreadId::new();
++        let review = ThreadId::new();
++        let check = ThreadId::new();
++        let fix = ThreadId::new();
++        let scan = ThreadId::new();
++        let validate = ThreadId::new();
++        let audit = ThreadId::new();
++        app.primary_thread_id = Some(main);
++        app.active_thread_id = Some(main);
++        let view = Rect::new(0, 0, 40, 24);
++        assert!(app.agent_tree(view).is_empty());
++        for (id, path) in [
++            (review, "/root/review"),
++            (check, "/root/check"),
++            (fix, "/root/review/修正"),
++            (scan, "/root/review/scan"),
++            (validate, "/root/review/修正/validate"),
++            (audit, "/root/check/audit"),
++        ] {
++            app.agent_navigation.upsert(id, None, None, false);
++            app.agent_navigation.mark_running(id);
++            app.agent_navigation.set_agent_path(id, Some(path.into()));
++        }
++        app.agent_navigation.set_parent(check, Some(main));
++        app.agent_navigation.mark_running(review);
++        let labels = |app: &App| {
++            app.agent_tree(view)
++                .iter()
++                .map(|(id, line)| (*id, line.to_string()))
++                .collect::<Vec<_>>()
++        };
++        assert_eq!(
++            labels(&app),
++            [
++                (Some(main), "● main".into()),
++                (Some(review), "○ review (+3)".into()),
++                (Some(check), "○ check (+1)".into()),
++            ]
++        );
++        app.active_thread_id = Some(review);
++        assert_eq!(
++            labels(&app),
++            [
++                (Some(main), "○ main".into()),
++                (Some(review), "● review".into()),
++                (Some(fix), "├─ ○ 修正 (+1)".into()),
++                (Some(scan), "└─ ○ scan".into()),
++                (Some(check), "○ check (+1)".into()),
++            ]
++        );
++        app.active_thread_id = Some(fix);
++        assert_eq!(
++            labels(&app),
++            [
++                (Some(main), "○ main".into()),
++                (Some(review), "○ review".into()),
++                (Some(fix), "├─ ● 修正".into()),
++                (Some(validate), "  └─ ○ validate".into()),
++                (Some(scan), "└─ ○ scan".into()),
++            ]
++        );
++        let short = app.agent_tree(Rect { height: 6, ..view });
++        assert_eq!(
++            short.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
++            [Some(main), Some(fix), None]
++        );
++
++        let rows = app.agent_tree(view);
++        let conversation = Rect { height: 19, ..view };
++        let mut buffer = Buffer::empty(view);
++        let pointer = Position::new(10, 22);
++        app.conversation_frame.agent_tree = paint(&rows, conversation, Some(pointer), &mut buffer);
++        assert_eq!(app.agent_tree_target(Some(pointer)), Some(validate));
++        assert_eq!(
++            app.agent_tree_target(Some(Position::new(1, 19))),
++            Some(main)
++        );
++        assert_eq!(app.agent_tree_target(Some(Position::new(28, 22))), None);
++        let hovered = buffer[pointer].clone();
++        let marker = &buffer[(1, 20)];
++        let name = &buffer[(3, 20)];
++        assert_eq!(marker.symbol(), "○");
++        assert_eq!(marker.fg, name.fg);
++        assert_eq!(marker.modifier, name.modifier);
++        assert!(!marker.modifier.contains(Modifier::BOLD));
++        assert_ne!(marker.fg, Color::Green);
++        let selected = &buffer[(4, 21)];
++        assert_eq!(selected.symbol(), "●");
++        assert!(selected.modifier.contains(Modifier::BOLD));
++        assert!(marker.fg != selected.fg || marker.modifier.contains(Modifier::DIM));
++        buffer.reset();
++        paint(&rows, conversation, None, &mut buffer);
++        assert!(buffer[pointer].bg != hovered.bg || buffer[pointer].modifier != hovered.modifier);
++
++        app.primary_thread_id = Some(ThreadId::new());
++        assert_eq!(app.agent_tree_target(Some(pointer)), None);
++    }
++}
+diff --git a/codex-rs/tui/src/app/link_hover.rs b/codex-rs/tui/src/app/link_hover.rs
+--- a/codex-rs/tui/src/app/link_hover.rs
++++ b/codex-rs/tui/src/app/link_hover.rs
+@@ -149,7 +149,10 @@
+             && tui
+                 .link_hover
+                 .mouse
+-                .is_some_and(|mouse| self.transcript_link_at(mouse).is_some())
++                .is_some_and(|mouse| {
++                    self.transcript_link_at(mouse).is_some()
++                        || self.agent_tree_target(Some((mouse.column, mouse.row).into())).is_some()
++                })
+         {
+             PointerShape::Link
+         } else {
+diff --git a/codex-rs/tui/src/app/loaded_threads.rs b/codex-rs/tui/src/app/loaded_threads.rs
+--- a/codex-rs/tui/src/app/loaded_threads.rs
++++ b/codex-rs/tui/src/app/loaded_threads.rs
+@@ -28,6 +28,7 @@
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct LoadedSubagentThread {
+     pub(crate) thread_id: ThreadId,
++    pub(crate) parent_thread_id: Option<ThreadId>,
+     pub(crate) agent_nickname: Option<String>,
+     pub(crate) agent_role: Option<String>,
+     pub(crate) agent_path: Option<String>,
+@@ -93,6 +94,7 @@
+                     is_running: matches!(&thread.status, ThreadStatus::Active { .. }),
+                     is_closed: matches!(&thread.status, ThreadStatus::NotLoaded),
+                     thread_id,
++                    parent_thread_id: thread_spawn_parent_thread_id(&thread.source),
+                     agent_nickname: thread.agent_nickname,
+                     agent_role: thread.agent_role,
+                     agent_path: thread_spawn_agent_path(&thread.source),
+@@ -115,4 +117,4 @@
+-fn thread_spawn_parent_thread_id(source: &SessionSource) -> Option<ThreadId> {
++pub(super) fn thread_spawn_parent_thread_id(source: &SessionSource) -> Option<ThreadId> {
+     match source {
+         SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+             parent_thread_id, ..
+@@ -243,6 +245,7 @@
+                 LoadedSubagentThread {
+                     blocks_direct_input: false,
+                     thread_id: child_thread_id,
++                    parent_thread_id: Some(primary_thread_id),
+                     agent_nickname: Some("Scout".to_string()),
+                     agent_role: Some("explorer".to_string()),
+                     agent_path: None,
+@@ -252,6 +255,7 @@
+                 LoadedSubagentThread {
+                     blocks_direct_input: true,
+                     thread_id: grandchild_thread_id,
++                    parent_thread_id: Some(child_thread_id),
+                     agent_nickname: Some("Atlas".to_string()),
+                     agent_role: Some("worker".to_string()),
+                     agent_path: None,
+diff --git a/codex-rs/tui/src/app/owned_transcript.rs b/codex-rs/tui/src/app/owned_transcript.rs
+--- a/codex-rs/tui/src/app/owned_transcript.rs
++++ b/codex-rs/tui/src/app/owned_transcript.rs
+@@ -39,6 +39,7 @@
+     pub(super) chat_strip: Option<Rect>,
+     pub(super) sidebar_input: Option<sidebar::SidebarInputState>,
+     pub(super) close_buttons: [Rect; 2],
++    pub(super) agent_tree: Vec<(Rect, ThreadId)>,
+     /// A dialog can obscure neighboring content in the terminal's completed buffer.
+     behind_dialog: Option<ratatui::buffer::Buffer>,
+     caller_images: Vec<ImagePlacement>,
+@@ -283,6 +284,9 @@
+         };
+         let mut prepared =
+             self.prepare_conversation(screen_size.into(), caller_inset.or(live), &frames);
++        let tree = self.agent_tree(prepared.area);
++        prepared.area.height -= tree.len() as u16;
++        self.conversation_frame.agent_tree.clear();
+         self.conversation_frame.sidebar = layout;
+         self.conversation_frame.chat_strip = strip;
+         self.conversation_frame.sidebar_input =
+@@ -297,7 +301,9 @@
+         }
+         let highlight_divider =
+             self.pane_resize.is_some() || tui.link_hover.shape == tui::PointerShape::Resize;
+-        let hovered_target = self.hovered_sidebar_target(tui.link_hover.position());
++        let pointer = tui.link_hover.position();
++        let hovered_target = self.hovered_sidebar_target(pointer);
++        let agent_pointer = pointer.filter(|_| !self.transcript_view.is_select_mode());
+         // An input refresh opens a fresh terminal buffer. Carry the outer owner's
+         // completed cells through it when only the conversation is being redrawn.
+         let backdrop = caller_inset.map(|_| {
+@@ -330,6 +336,8 @@
+                 }
+             }
+             painted = self.paint_conversation(frame, &prepared);
++            self.conversation_frame.agent_tree =
++                super::agent_tree::paint(&tree, prepared.area, agent_pointer, frame.buffer);
+             match &self.conversation_frame.sidebar {
+                 Some(sidebar::SidebarLayout::Chat(panes)) => {
+                     if let Some(companion) = self.side_companions.get_mut(&panes.passive_thread) {
+diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
+--- a/codex-rs/tui/src/app/session_lifecycle.rs
++++ b/codex-rs/tui/src/app/session_lifecycle.rs
+@@ -333,6 +333,10 @@
+                 if is_parent_owned {
+                     self.agent_navigation.mark_parent_owned(thread_id);
+                 }
++                self.agent_navigation.set_parent(
++                    thread_id,
++                    super::loaded_threads::thread_spawn_parent_thread_id(&thread.source),
++                );
+                 self.agent_navigation.set_agent_path(thread_id, agent_path);
+                 self.sync_agent_picker_thread(thread_id);
+                 if is_running {
+@@ -1630,6 +1634,8 @@
+                 thread.agent_role,
+                 is_closed,
+             );
++            self.agent_navigation
++                .set_parent(thread.thread_id, thread.parent_thread_id);
+             self.agent_navigation
+                 .set_agent_path(thread.thread_id, agent_path);
+             // A live channel can have an empty store after a successful spawn. Only apply server
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -1210,6 +1210,10 @@
+                 started.thread.agent_role.clone(),
+                 /*is_closed*/ false,
+             );
++            self.agent_navigation.set_parent(
++                thread_id,
++                super::loaded_threads::thread_spawn_parent_thread_id(&started.thread.source),
++            );
+             self.agent_navigation.set_agent_path(
+                 thread_id,
+                 crate::app_server_session::source_agent_path(&started.thread.source),
+@@ -1256,10 +1260,13 @@
+                 }
+                 _ => false,
+             };
++            self.update_agent_tree_activity(thread_id, &notification, turn_stopped);
+             let notification = if guard.active {
+                 guard.push_notification_ref(&notification);
+                 Some(notification)
+             } else {
++                // The agent tree follows descendants while this transcript is buffered.
++                self.cache_collab_receiver_threads_for_notification(&notification);
+                 if self
+                     .background_voice
+                     .as_ref()
+@@ -1313,6 +1320,11 @@
+         } else if turn_stopped {
+             self.agent_navigation.mark_stopped(thread_id);
+         }
++        if (is_turn_started || is_thread_closed || turn_stopped)
++            && self.agent_navigation.get(&thread_id).is_some()
++        {
++            self.chat_widget.request_redraw();
++        }
+
+         // Settings snapshots do not belong in the transcript queue: apply them in receive order.
+         if let Some(ServerNotification::ThreadSettingsUpdated(settings)) = notification.as_ref()
+@@ -1379,12 +1391,14 @@
+         &mut self,
+         notification: &ServerNotification,
+     ) {
+-        if let Some(activity) =
+-            sub_agent_activity_item(notification).and_then(sub_agent_activity_display)
++        if let Some(item) = sub_agent_activity_item(notification)
++            && let Some(activity) = sub_agent_activity_display(item)
+         {
+             let thread_id = activity.thread_id;
+             self.agent_navigation.record_sub_agent_activity(activity);
++            self.update_agent_tree_spawn_activity(thread_id, item);
+             self.sync_agent_picker_thread(thread_id);
++            self.chat_widget.request_redraw();
+             return;
+         }
+
+diff --git a/codex-rs/tui/src/app/agent_status_feed.rs b/codex-rs/tui/src/app/agent_status_feed.rs
+--- a/codex-rs/tui/src/app/agent_status_feed.rs
++++ b/codex-rs/tui/src/app/agent_status_feed.rs
+@@ -135,7 +135,7 @@
+     }
+ }
+
+-fn activity_summary(item: &ThreadItemPayload) -> Option<String> {
++pub(super) fn activity_summary(item: &ThreadItemPayload) -> Option<String> {
+     let summary = match item {
+         ThreadItemPayload::AgentMessage { text, .. } | ThreadItemPayload::Plan { text, .. } => text,
+         ThreadItemPayload::Reasoning { summary, .. } => summary.last()?,
+diff --git a/codex-rs/tui/src/app/agent_picker.rs b/codex-rs/tui/src/app/agent_picker.rs
+--- a/codex-rs/tui/src/app/agent_picker.rs
++++ b/codex-rs/tui/src/app/agent_picker.rs
+@@ -153,6 +153,7 @@
+                 continue;
+             }
+             let agent_path = crate::app_server_session::source_agent_path(&thread.source);
++            let parent = super::loaded_threads::thread_spawn_parent_thread_id(&thread.source);
+             let agent_nickname = thread
+                 .agent_nickname
+                 .or_else(|| previous.and_then(|entry| entry.agent_nickname.clone()));
+@@ -163,6 +164,7 @@
+                 self.agent_navigation.mark_parent_owned(thread_id);
+             }
+             self.upsert_agent_picker_thread(thread_id, agent_nickname, agent_role, is_closed);
++            self.agent_navigation.set_parent(thread_id, parent);
+             self.agent_navigation.set_agent_path(thread_id, agent_path);
+             if !live && update_liveness {
+                 self.agent_navigation.set_running(thread_id, is_running);
+@@ -179,6 +181,7 @@
+         self.agent_navigation.prune_untracked_picker_exclusions();
+
+         self.refresh_agent_picker();
++        self.chat_widget.request_redraw();
+         if completion.follow_up_requested {
+             self.refresh_agent_picker_threads(app_server, root);
+         }

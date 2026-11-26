@@ -59,7 +59,8 @@ test('native snapshot keeps quota beside model and context and omits invented co
   });
   const out = rows.join('\n');
   assert.equal(scanned, root);
-  assert.match(rows[0], /GPT-6.1 high.*ctx .*47%.*7d .*3%.*read_file render.js.*3\/7.*agents 2/);
+  assert.match(rows[0], /GPT-6.1 high.*ctx .*47%.*7d .*3%.*read_file render.js.*3\/7/);
+  assert.doesNotMatch(rows[0], /agents \d+/);
   assert.equal(rows[1], '#128');
   assert.equal(rows[2], '\u2800');
   assert.equal(rows.length, 3);
@@ -67,7 +68,7 @@ test('native snapshot keeps quota beside model and context and omits invented co
   assert.doesNotMatch(out, /quota used|session tokens|\b[MDS]\d|Ready|working|500k|1M\//);
 });
 
-test('native footer matches the Claude renderer for the same available data', async () => {
+test('native footer matches the shared renderer without the subagent count', async () => {
   const input = snapshot(), git = () => umbrella(2);
   const actual = await renderNative(input, cfg({ maxLines: 16 }), 0, { git });
   const expected = await render({
@@ -76,7 +77,7 @@ test('native footer matches the Claude renderer for the same available data', as
     context_window: { used_percentage: 47, context_window_size: 475000, current_usage: { input_tokens: 223563 } },
     rate_limits: { seven_day: { used_percentage: 3 } },
   }, deepMerge(DEFAULTS, { color: false, links: false, lines: CODEX_DEFAULTS.lines.map(line => line.map(id => id === 'limits' ? 'limit-7d' : id)) }), 0, {
-    git, usage: () => null, today: () => null, plan: () => null, transcript: () => input.activity,
+    git, usage: () => null, today: () => null, plan: () => null, transcript: () => ({ ...input.activity, agents: undefined }),
   });
   expected.push('\u2800');
   assert.deepEqual(actual, expected);
@@ -168,7 +169,7 @@ test('missing exact context usage never fabricates a token count from rounded pe
   await assert.rejects(renderNative({ schema_version: 2 }, cfg()), /schema_version=1/);
 });
 
-test('agent attention is localized, stays inline when it fits and omits zero counters', async () => {
+test('agent attention is localized, stays inline when it fits and omits counters', async () => {
   const input = snapshot();
   input.columns = 200;
   const baseline = await renderNative(input, cfg(), 0, { git: () => null });
@@ -183,7 +184,7 @@ test('agent attention is localized, stays inline when it fits and omits zero cou
       const rows = await renderNative(input, cfg({ lang }), 0, { git: () => null });
       assert.equal(rows.length, baseline.length);
       assert.ok(rows[0].includes(label), rows[0]);
-      assert.doesNotMatch(rows.join('\n'), /agents 0/);
+      assert.doesNotMatch(rows.join('\n'), /agents \d+/);
     }
   }
   input.activity = { ...snapshot().activity, agent_attention: [null, { name: 'reviewer', status: 'running' }] };

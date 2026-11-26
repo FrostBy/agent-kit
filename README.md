@@ -77,6 +77,8 @@ Install copies the official standalone package into `<version>-agent-kit`, keeps
 
 The footer uses the Claude layout with data from native CLI JSON and ends with an auto/plan/read-only mode line; `maxLines` in `--codex --configure` limits its content rows. `node scripts/native-codex.js [project]` runs a dev build in an isolated home with a loopback provider, without touching your Codex.
 
+The footer tree follows live agent events and shows activity, elapsed time and reported tokens as space allows. Open an agent to see its direct children and peers. Collapsed branches count visible descendants in `(+N)`. Successful agents leave the footer immediately. Failed or stopped rows stay for 30 seconds, and an open agent transcript stays visible. Use `/subagents` to reopen a finished agent. In fullscreen mode, hover to highlight a row and click to open it. Alt+Left/Right switches threads on an empty draft. V2 spawned subagents support viewing their chat history.
+
 Details in [patches/README.md](patches/README.md): what each patch adds, build/install internals, paths and limitations.
 
 ### Dictation and voice
